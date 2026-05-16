@@ -1,9 +1,8 @@
 use crate::api::doc::SNAPSHOT_TAG;
 use crate::api::error::{ApiError, ApiResult};
-use crate::api::{PageParams, PagedResponse, ResourceParams};
 use crate::app::AppState;
 use crate::config::Action;
-use crate::extract::{Ctx, Json, Query};
+use crate::extract::{Ctx, Json, PageParams, PagedResponse, Query, ResourceParams};
 use crate::resource;
 use crate::resource::snapshot::SnapshotInfo;
 use crate::search::Builder;
@@ -14,8 +13,6 @@ use utoipa_axum::routes;
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().routes(routes!(list))
 }
-
-const MAX_SNAPSHOTS_PER_PAGE: i64 = 1000;
 
 /// Lists recent resource snapshots.
 ///
@@ -58,7 +55,7 @@ async fn list(
     ctx.verify_privilege(Action::SnapshotList)?;
 
     let offset = page.offset.unwrap_or(0);
-    let limit = std::cmp::min(page.limit.get(), MAX_SNAPSHOTS_PER_PAGE);
+    let limit = page.limit();
     let fields = resource::create_table(resource.fields()).map_err(Box::from)?;
     connection_pool
         .transaction(move |conn| {
