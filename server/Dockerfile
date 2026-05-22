@@ -1,9 +1,8 @@
 ARG ALPINE_VERSION=3.23
-ARG RUST_VERSION=1.94.0
+ARG RUST_VERSION=1.95.0
 ARG CHEF_VERSION=0.1.77
-ARG FFMPEG_VERSION=8.1
+ARG FFMPEG_VERSION=8.1.1
 ARG DAV1D_VERSION=1.5.3
-
 ############################### FFmpeg Phase ###############################
 FROM alpine:${ALPINE_VERSION} AS ffmpeg_builder
 ARG FFMPEG_VERSION
@@ -31,19 +30,6 @@ WORKDIR /build/ffmpeg-${FFMPEG_VERSION}
 ARG TARGET_CPU
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 RUN ./configure \
-    --disable-everything \
-    --disable-network \
-    --disable-autodetect \
-    --disable-doc \
-    --disable-htmlpages \
-    --disable-manpages \
-    --disable-podpages \
-    --disable-txtpages \
-    --disable-debug \
-    --disable-ffprobe \
-    --disable-shared \
-    --disable-pic \
-    \
     --enable-static \
     --enable-libdav1d \
     --enable-protocol=file,pipe \
@@ -68,7 +54,7 @@ RUN readelf -d ffmpeg | grep -q "NEEDED" \
   || echo "ffmpeg is fully static"
 
 ############################## Planning Phase ##############################
-FROM lukemathwalker/cargo-chef:${CHEF_VERSION}-rust-${RUST_VERSION}-alpine${ALPINE_VERSION} AS chef
+FROM docker.io/lukemathwalker/cargo-chef:${CHEF_VERSION}-rust-${RUST_VERSION}-alpine${ALPINE_VERSION} AS chef
 WORKDIR /opt/app
 
 # Create recipe of crate dependencies
@@ -83,7 +69,7 @@ ENV DOCKER_DEPLOYMENT=1
 RUN mkdir -p /data
 
 # Install system dependencies
-RUN apk add --no-cache build-base perl
+RUN apk add --no-cache build-base gcc g++ musl-dev libgcc libstdc++ cmake ninja pkgconf perl
 
 COPY --from=planner /opt/app/recipe.json recipe.json
 
@@ -93,7 +79,7 @@ COPY macros/src macros/src
 
 # Build dependencies (this will be cached for future builds)
 ARG TARGET_CPU
-ARG CODEGEN_OPTIONS="-C target-cpu=$TARGET_CPU"
+ARG CODEGEN_OPTIONS="-C target-cpu=$TARGET_CPU -C link-arg=-lgcc -C link-arg=-lstdc++"
 RUN RUSTFLAGS=${CODEGEN_OPTIONS} cargo chef cook --release --recipe-path recipe.json
 
 # Buid application
