@@ -77,7 +77,7 @@ pub enum PostType {
 impl From<MimeType> for PostType {
     fn from(value: MimeType) -> Self {
         match value {
-            MimeType::Avif | MimeType::Bmp | MimeType::Jpeg | MimeType::Png | MimeType::Webp => Self::Image,
+            MimeType::Avif | MimeType::Bmp | MimeType::Jpeg | MimeType::Jxl | MimeType::Png | MimeType::Webp => Self::Image,
             MimeType::Gif => Self::Animation,
             MimeType::Mp4 | MimeType::Mov | MimeType::Webm => Self::Video,
             MimeType::Swf => Self::Flash,
@@ -123,6 +123,8 @@ pub enum MimeType {
     Swf,
     #[serde(rename = "image/avif")]
     Avif,
+    #[serde(rename = "image/jxl")]
+    Jxl,
 }
 
 impl MimeType {
@@ -132,6 +134,7 @@ impl MimeType {
         match extension.to_ascii_lowercase().as_str() {
             "avif" => Ok(Self::Avif),
             "bmp" | "dib" => Ok(Self::Bmp),
+            "jxl" => Ok(Self::Jxl),
             "gif" => Ok(Self::Gif),
             "jpg" | "jpeg" | "jpe" | "jif" | "jfif" | "jfi" => Ok(Self::Jpeg),
             "png" => Ok(Self::Png),
@@ -156,6 +159,7 @@ impl MimeType {
         match self {
             Self::Avif => "avif",
             Self::Bmp => "bmp",
+            Self::Jxl => "jxl",
             Self::Gif => "gif",
             Self::Jpeg => "jpg",
             Self::Png => "png",
@@ -178,6 +182,7 @@ impl MimeType {
             MimeType::Jpeg => Some(ImageFormat::Jpeg),
             MimeType::Png => Some(ImageFormat::Png),
             MimeType::Webp => Some(ImageFormat::WebP),
+            MimeType::Jxl => Some(ImageFormat::Jxl),
             MimeType::Avif | MimeType::Mov | MimeType::Mp4 | MimeType::Webm | MimeType::Swf => None,
         }
     }
@@ -191,6 +196,7 @@ impl FromStr for MimeType {
             "application/x-shockwave-flash" | "application/vnd.adobe.flash.movie" => Ok(MimeType::Swf),
             "image/avif" => Ok(MimeType::Avif),
             "image/bmp" => Ok(MimeType::Bmp),
+            "image/jxl" => Ok(MimeType::Jxl),
             "image/gif" => Ok(MimeType::Gif),
             "image/jpeg" => Ok(MimeType::Jpeg),
             "image/png" => Ok(MimeType::Png),

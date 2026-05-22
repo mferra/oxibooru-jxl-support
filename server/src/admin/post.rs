@@ -1,12 +1,14 @@
 use crate::admin::input::PostEditor;
 use crate::admin::{AdminResult, PRINT_INTERVAL, ProgressReporter, input};
 use crate::app::AppState;
+use crate::content::encode;
 use crate::content::hash::{Checksum, PostHash};
 use crate::content::signature::SIGNATURE_VERSION;
 use crate::content::thumbnail::{ThumbnailCategory, ThumbnailType};
 use crate::content::{decode, hash, signature, thumbnail};
 use crate::extract::Ctx;
-use crate::model::enums::MimeType;
+use crate::filesystem;
+use crate::model::enums::{MimeType, PostType};
 use crate::model::post::{CompressedSignature, NewPostSignature};
 use crate::schema::{database_statistics, post, post_signature};
 use crate::search::Builder;
@@ -329,6 +331,137 @@ fn regenerate_thumbnail_in_parallel(state: &AppState, post_id: i64, progress: &P
     } else {
         progress.increment();
     }
+    Ok(())
+}
+
+/// Re-encodes image-type post content as JPEG XL and regenerates thumbnails.
+///
+/// Skips animated (GIF), video, and Flash posts. For each eligible post:
+/// 1. Decodes the existing content file.
+/// 2. Encodes to JXL and writes the new file.
+/// 3. Removes the old content file.
+/// 4. Updates `mime_type` and `checksum` in the database.
+/// 5. Regenerates and saves the thumbnail.
+pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
+    input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
+        let post_ids = user_query(state, editor)?;
+
+        let _timer = Timer::new("convert_posts_to_jxl");
+        let progress = ProgressReporter::new("Posts converted to JXL", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new("Posts skipped (non-image type)", None);
+        post_ids
+            .into_par_iter()
+            .try_for_each(|post_id| convert_post_to_jxl_in_parallel(state, post_id, &progress, &skipped))?;
+        skipped.report();
+        Ok(())
+    });
+}
+
+/// Converts a single post to JXL. Designed for use inside a parallel iterator.
+fn convert_post_to_jxl_in_parallel(
+    state: &AppState,
+    post_id: i64,
+    progress: &ProgressReporter,
+    skipped: &ProgressReporter,
+) -> AdminResult<()> {
+    admin::is_cancelled()?;
+
+    let mut conn = state.connection_pool.get_blocking()?;
+    let mime_type = match post::table
+        .find(post_id)
+        .select(post::mime_type)
+        .first(&mut conn)
+        .optional()
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => return Ok(()), // deleted between query and processing
+        Err(err) => {
+            error!("Cannot retrieve MIME type for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
+
+    // Only re-encode still images; skip animation, video, flash, and already-JXL.
+    if mime_type == MimeType::Jxl || PostType::from(mime_type) != PostType::Image {
+        skipped.increment();
+        return Ok(());
+    }
+
+    let post_hash = PostHash::new(&state.config, post_id);
+    let old_content_path = post_hash.content_path(mime_type);
+
+    // Decode the original file.
+    let decoded = match decode::image(&old_content_path, mime_type) {
+        Ok(img) => img,
+        Err(err) => {
+            error!("Cannot decode content for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
+
+    // Encode to JXL.
+    let jxl_bytes = match encode::to_jxl(&decoded) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("JXL encode failed for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
+
+    // Write new JXL content file.
+    let new_content_path = post_hash.content_path(MimeType::Jxl);
+    if let Err(err) = filesystem::create_parent_directories(&new_content_path)
+        .and_then(|_| std::fs::write(&new_content_path, &jxl_bytes).map_err(Into::into))
+    {
+        error!("Cannot write JXL content for post {post_id}: {err}");
+        return Ok(());
+    }
+
+    // Compute new checksum.
+    let (new_checksum, new_md5) = match hash::compute_checksums(&new_content_path) {
+        Ok(cs) => cs,
+        Err(err) => {
+            error!("Cannot compute checksum for post {post_id}: {err}");
+            let _ = std::fs::remove_file(&new_content_path);
+            return Ok(());
+        }
+    };
+
+    // Generate thumbnail.
+    let thumb = thumbnail::create(&state.config, &decoded, ThumbnailType::Post);
+
+    // Persist everything atomically-ish: update DB then swap files.
+    let db_result = conn.transaction(|conn| {
+        diesel::update(post::table.find(post_id))
+            .set((
+                post::mime_type.eq(MimeType::Jxl),
+                post::checksum.eq(new_checksum.as_ref()),
+                post::checksum_md5.eq(new_md5.as_ref()),
+                post::file_size.eq(jxl_bytes.len() as i64),
+            ))
+            .execute(conn)
+    });
+
+    if let Err(err) = db_result {
+        error!("DB update failed for post {post_id}: {err}");
+        let _ = std::fs::remove_file(&new_content_path);
+        return Ok(());
+    }
+
+    // Remove old content file.
+    if let Err(err) = std::fs::remove_file(&old_content_path) {
+        warn!("Could not remove old content for post {post_id}: {err}");
+    }
+
+    // Regenerate thumbnail (delete old format variants first).
+    if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
+        warn!("Could not remove old thumbnail for post {post_id}: {err}");
+    }
+    if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumb, ThumbnailCategory::Generated) {
+        error!("Cannot save thumbnail for post {post_id}: {err}");
+    }
+
+    progress.increment();
     Ok(())
 }
 

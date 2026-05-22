@@ -27,12 +27,32 @@ pub enum RegexType {
     Password,
 }
 
+/// Encoding format used for generated and custom post thumbnails.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThumbnailFormat {
+    #[default]
+    Jpeg,
+    Jxl,
+}
+
+impl ThumbnailFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Jxl => "jxl",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ThumbnailConfig {
     pub avatar_width: u32,
     pub avatar_height: u32,
     pub post_width: u32,
     pub post_height: u32,
+    #[serde(default)]
+    pub format: ThumbnailFormat,
 }
 
 impl ThumbnailConfig {

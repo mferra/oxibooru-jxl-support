@@ -1,5 +1,6 @@
 use crate::api::error::{ApiError, ApiResult};
-use crate::config::Config;
+use crate::config::{Config, ThumbnailFormat};
+use crate::content::encode;
 use crate::content::hash::PostHash;
 use crate::content::thumbnail::ThumbnailCategory;
 use crate::content::upload::UploadToken;
@@ -77,7 +78,7 @@ pub fn delete_custom_avatar(config: &Config, username: &str) -> std::io::Result<
 }
 
 /// Saves `post` `thumbnail` to disk. Can be custom or automatically generated.
-/// Returns size of the thumbnail in bytes.
+/// Returns size of the thumbnail in bytes. Format follows `config.thumbnails.format`.
 pub fn save_post_thumbnail(
     post: &PostHash,
     thumbnail: &DynamicImage,
@@ -89,7 +90,13 @@ pub fn save_post_thumbnail(
     };
     create_parent_directories(&thumbnail_path)?;
 
-    thumbnail.to_rgb8().save(&thumbnail_path)?;
+    match post.config().thumbnails.format {
+        ThumbnailFormat::Jpeg => thumbnail.to_rgb8().save(&thumbnail_path)?,
+        ThumbnailFormat::Jxl => {
+            let bytes = encode::to_jxl(thumbnail)?;
+            std::fs::write(&thumbnail_path, bytes).map_err(ImageError::from)?;
+        }
+    }
     file_size(&thumbnail_path).map_err(ImageError::from)
 }
 
@@ -100,6 +107,20 @@ pub fn delete_post_thumbnail(post: &PostHash, thumbnail_type: ThumbnailCategory)
         ThumbnailCategory::Custom => post.custom_thumbnail_path(),
     };
     remove_if_exists(&thumbnail_path)
+}
+
+/// Deletes all thumbnail variants (both `.jpg` and `.jxl`) for `post`.
+/// Used during format-conversion tasks to remove the old file regardless of
+/// which format was in use before the migration.
+pub fn delete_post_thumbnails_all_formats(post: &PostHash, thumbnail_type: ThumbnailCategory) -> std::io::Result<()> {
+    for ext in ["jpg", "jxl"] {
+        let path = match thumbnail_type {
+            ThumbnailCategory::Generated => post.generated_thumbnail_path_with_ext(ext),
+            ThumbnailCategory::Custom => post.custom_thumbnail_path_with_ext(ext),
+        };
+        remove_if_exists(&path)?;
+    }
+    Ok(())
 }
 
 /// Deletes `post` content from disk.
@@ -123,7 +144,7 @@ pub fn swap_posts(
     post_b: &PostHash,
     mime_type_b: MimeType,
 ) -> std::io::Result<()> {
-    // No special cases needed here because generated thumbnails always exists and their type is always .jpg
+    // Generated thumbnails always exist; both posts share the same configured format.
     swap_files(config, &post_a.generated_thumbnail_path(), &post_b.generated_thumbnail_path())?;
 
     // Handle the four distinct cases of custom thumbnails existing/not existing
@@ -248,8 +269,8 @@ fn set_permissions(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, permissions)
 }
 
-/// For a given `path`, recusively creates all parent directories if they don't already exist.
-fn create_parent_directories(path: &Path) -> std::io::Result<()> {
+/// For a given `path`, recursively creates all parent directories if they don't already exist.
+pub fn create_parent_directories(path: &Path) -> std::io::Result<()> {
     if let Err(err) = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")))
         && err.kind() != std::io::ErrorKind::AlreadyExists
     {

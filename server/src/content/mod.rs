@@ -10,6 +10,7 @@ use url::Url;
 pub mod cache;
 pub mod decode;
 pub mod download;
+pub mod encode;
 mod flash;
 pub mod hash;
 pub mod signature;

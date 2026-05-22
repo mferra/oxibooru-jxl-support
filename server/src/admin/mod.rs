@@ -92,6 +92,8 @@ pub enum AdminTask {
     ResetStatistics,
     #[strum(message = "Cache thumbnail sizes")]
     ResetThumbnailSizes,
+    #[strum(message = "Re-encode image posts as JXL and regenerate thumbnails")]
+    ConvertPostsToJxl,
 }
 
 /// Checks if server was started in admin mode.
@@ -202,6 +204,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::ResetFilenames => database::reset_filenames(state),
         AdminTask::ResetStatistics => database::reset_statistics(state),
         AdminTask::ResetThumbnailSizes => database::reset_thumbnail_sizes(state),
+        AdminTask::ConvertPostsToJxl => post::convert_posts_to_jxl(state, post_editor),
     }
 }
 

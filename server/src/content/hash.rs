@@ -39,6 +39,10 @@ impl<'a> PostHash<'a> {
         self.post_id
     }
 
+    pub fn config(&self) -> &Config {
+        self.config
+    }
+
     /// Returns URL to post content.
     pub fn content_url(&self, content_type: MimeType) -> String {
         const POSTS_DIRECTORY: Directory = Directory::Posts;
@@ -54,7 +58,8 @@ impl<'a> PostHash<'a> {
         } else {
             Directory::GeneratedThumbnails
         };
-        format!("{}/{thumbnail_folder}/{self}.{THUMBNAIL_EXTENSION}", self.config.data_url)
+        let ext = self.config.thumbnails.format.extension();
+        format!("{}/{thumbnail_folder}/{self}.{ext}", self.config.data_url)
     }
 
     /// Returns path to post content on disk.
@@ -65,13 +70,25 @@ impl<'a> PostHash<'a> {
 
     /// Returns path to generated post thumbnail on disk.
     pub fn generated_thumbnail_path(&self) -> PathBuf {
-        let filename = format!("{self}.{THUMBNAIL_EXTENSION}");
+        self.generated_thumbnail_path_with_ext(self.config.thumbnails.format.extension())
+    }
+
+    /// Returns path to generated post thumbnail with an explicit extension.
+    /// Use this to locate thumbnails whose format may differ from the current config.
+    pub fn generated_thumbnail_path_with_ext(&self, ext: &str) -> PathBuf {
+        let filename = format!("{self}.{ext}");
         self.config.path(Directory::GeneratedThumbnails).join(filename)
     }
 
     /// Returns path to custom post thumbnail on disk.
     pub fn custom_thumbnail_path(&self) -> PathBuf {
-        let filename = format!("{self}.{THUMBNAIL_EXTENSION}");
+        self.custom_thumbnail_path_with_ext(self.config.thumbnails.format.extension())
+    }
+
+    /// Returns path to custom post thumbnail with an explicit extension.
+    /// Use this to locate thumbnails whose format may differ from the current config.
+    pub fn custom_thumbnail_path_with_ext(&self, ext: &str) -> PathBuf {
+        let filename = format!("{self}.{ext}");
         self.config.path(Directory::CustomThumbnails).join(filename)
     }
 }
@@ -182,4 +199,3 @@ pub fn compute_url_safe_hash(content: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(hash.as_bytes())
 }
 
-const THUMBNAIL_EXTENSION: &str = "jpg";
