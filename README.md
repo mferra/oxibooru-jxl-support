@@ -1,3 +1,5 @@
+This fork is a experimental and personal use, I really not expert on rust, and this was done using CloudeCode, so the presence of errors are likely on the code. I'm still experimenting with this version if JXL runs ok
+
 # Oxibooru
 
 Oxibooru is an image board engine based on [Szurubooru](https://github.com/rr-/szurubooru). The backend has been entirely rewritten in Rust with a focus on performance 🚀.
