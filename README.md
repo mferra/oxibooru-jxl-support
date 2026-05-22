@@ -1,4 +1,4 @@
-This fork is a experimental and personal use, I really not expert on rust, and this was done using CloudeCode, so the presence of errors are likely on the code. I'm still experimenting with this version if JXL runs ok
+This fork is a experimental and personal use, I really not expert on rust, and this was done using CloudeCode, so the presence of errors are likely on the code. I'm still experimenting with this version if JXL runs ok. All credit of creation are for liamw1 on liamw1/oxibooru
 
 # Oxibooru
 
