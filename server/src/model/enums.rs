@@ -182,8 +182,7 @@ impl MimeType {
             MimeType::Jpeg => Some(ImageFormat::Jpeg),
             MimeType::Png => Some(ImageFormat::Png),
             MimeType::Webp => Some(ImageFormat::WebP),
-            MimeType::Jxl => Some(ImageFormat::Jxl),
-            MimeType::Avif | MimeType::Mov | MimeType::Mp4 | MimeType::Webm | MimeType::Swf => None,
+            MimeType::Avif | MimeType::Jxl | MimeType::Mov | MimeType::Mp4 | MimeType::Webm | MimeType::Swf => None,
         }
     }
 }

@@ -11,6 +11,53 @@ use std::path::Path;
 use swf::Tag;
 use tracing::error;
 
+/// Decodes a JPEG XL file at `file_path` using jxl-oxide.
+fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {
+    let jxl = jxl_oxide::JxlImage::builder()
+        .open(file_path)
+        .map_err(|e| ApiError::FfmpegError(e.to_string().into()))?;
+
+    let width = jxl.width();
+    let height = jxl.height();
+    let frame = jxl
+        .render_frame(0)
+        .map_err(|e| ApiError::FfmpegError(e.to_string().into()))?;
+
+    // image_planar() → Vec<FrameBuffer>, one element per channel
+    let fb = frame.image_planar();
+    let num_channels = fb.len();
+
+    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let npixels = (width * height) as usize;
+
+    if num_channels >= 4 {
+        let (r, g, b, a) = (fb[0].buf(), fb[1].buf(), fb[2].buf(), fb[3].buf());
+        let mut bytes = Vec::with_capacity(npixels * 4);
+        for i in 0..npixels {
+            bytes.push(to_u8(r[i]));
+            bytes.push(to_u8(g[i]));
+            bytes.push(to_u8(b[i]));
+            bytes.push(to_u8(a[i]));
+        }
+        RgbaImage::from_raw(width, height, bytes)
+            .map(DynamicImage::ImageRgba8)
+            .ok_or_else(|| ApiError::FfmpegError("JXL buffer size mismatch".into()))
+    } else {
+        let r = fb[0].buf();
+        let g = if num_channels >= 2 { fb[1].buf() } else { r };
+        let b = if num_channels >= 3 { fb[2].buf() } else { r };
+        let mut bytes = Vec::with_capacity(npixels * 3);
+        for i in 0..npixels {
+            bytes.push(to_u8(r[i]));
+            bytes.push(to_u8(g[i]));
+            bytes.push(to_u8(b[i]));
+        }
+        RgbImage::from_raw(width, height, bytes)
+            .map(DynamicImage::ImageRgb8)
+            .ok_or_else(|| ApiError::FfmpegError("JXL buffer size mismatch".into()))
+    }
+}
+
 /// Returns a representative image for the given content.
 /// For images, this is simply the decoded image.
 /// For videos, it is the first frame of the video.
@@ -73,6 +120,9 @@ pub fn swf_has_audio(path: &Path) -> ApiResult<bool> {
 
 /// Decodes a raw array of bytes into pixel data.
 pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
+    if mime_type == MimeType::Jxl {
+        return decode_jxl(file_path);
+    }
     if let Some(format) = mime_type.to_image_format() {
         let file = content::map_read_result(File::open(file_path))?;
 
