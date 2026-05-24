@@ -68,25 +68,23 @@ ENV DOCKER_DEPLOYMENT=1
 
 RUN mkdir -p /data
 
-# Install system dependencies
-RUN apk add --no-cache build-base gcc g++ musl-dev libgcc libstdc++ cmake ninja pkgconf perl
+RUN apk add --no-cache \
+  build-base gcc g++ musl-dev linux-headers \
+  libgcc libstdc++ cmake ninja pkgconf perl binutils
 
 COPY --from=planner /opt/app/recipe.json recipe.json
 
-# Copy local dependencies for cargo chef cook
 COPY macros/Cargo.toml macros/Cargo.toml
 COPY macros/src macros/src
 
-# Build dependencies (this will be cached for future builds)
-ARG TARGET_CPU
-ARG CODEGEN_OPTIONS="-C target-cpu=$TARGET_CPU -C link-arg=-lgcc -C link-arg=-lstdc++"
-RUN RUSTFLAGS=${CODEGEN_OPTIONS} cargo chef cook --release --recipe-path recipe.json
+ARG TARGET_CPU=x86-64-v2
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C link-arg=-static-libgcc -C link-arg=-static-libstdc++ -C link-arg=-lgcc -C link-arg=-lgcc_eh -C link-arg=-lstdc++"
 
-# Buid application
+RUN cargo chef cook --release --recipe-path recipe.json
+
 COPY . .
-RUN RUSTFLAGS=${CODEGEN_OPTIONS} cargo build --release
+RUN cargo build --release
 
-# Verify the Rust binary has no dynamic dependencies
 RUN readelf -d /opt/app/target/release/oxibooru_server | grep -q "NEEDED" \
   && (echo "Binary has dynamic dependencies!" && readelf -d /opt/app/target/release/oxibooru_server | grep NEEDED && exit 1) \
   || echo "Binary is fully static"
@@ -120,11 +118,3 @@ VOLUME ["/data/"]
 ARG DOCKER_REPO
 ARG BUILD_DATE
 ARG SOURCE_COMMIT
-LABEL maintainer="" \
-  org.opencontainers.image.title="${DOCKER_REPO}" \
-  org.opencontainers.image.url="https://github.com/liamw1/oxibooru" \
-  org.opencontainers.image.documentation="https://github.com/liamw1/oxibooru/blob/${SOURCE_COMMIT}/docs/INSTALL.md" \
-  org.opencontainers.image.created="${BUILD_DATE}" \
-  org.opencontainers.image.source="https://github.com/liamw1/oxibooru" \
-  org.opencontainers.image.revision="${SOURCE_COMMIT}" \
-  org.opencontainers.image.licenses="GPL-3.0"
