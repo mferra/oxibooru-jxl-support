@@ -22,7 +22,7 @@ WORKDIR /var/www
 COPY --from=builder /opt/app/public/ .
 
 
-FROM nginx:alpine AS release
+FROM docker.io/nginx:alpine AS release
 
 RUN apk --no-cache add dumb-init
 COPY --from=approot / /
