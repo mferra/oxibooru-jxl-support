@@ -345,6 +345,7 @@ const POSTS: &[NewPost] = &[
         flags: PostFlags::new(),
         source: "starry_night.png",
         description: "0101100010",
+        phash: None,
     },
     NewPost {
         user_id: Some(2),
@@ -359,6 +360,7 @@ const POSTS: &[NewPost] = &[
         flags: PostFlags::new(),
         source: "gif.gif",
         description: "",
+        phash: None,
     },
     NewPost {
         user_id: Some(2),
@@ -373,6 +375,7 @@ const POSTS: &[NewPost] = &[
         flags: PostFlags::new(),
         source: "bmp.bmp",
         description: "",
+        phash: None,
     },
     NewPost {
         user_id: Some(2),
@@ -387,6 +390,7 @@ const POSTS: &[NewPost] = &[
         flags: PostFlags::new(),
         source: "1_pixel.png",
         description: "description9000",
+        phash: None,
     },
     NewPost {
         user_id: None,
@@ -401,6 +405,7 @@ const POSTS: &[NewPost] = &[
         flags: PostFlags::new_with(PostFlag::Sound),
         source: "mp4.mp4",
         description: "descriptor",
+        phash: None,
     },
 ];
 
