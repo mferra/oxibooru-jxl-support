@@ -348,12 +348,14 @@ pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("convert_posts_to_jxl");
-        let progress = ProgressReporter::new("Posts converted to JXL", PRINT_INTERVAL);
-        let skipped = ProgressReporter::new("Posts skipped (non-image type)", None);
+        let converted = ProgressReporter::new("Posts converted to JXL", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new("Posts skipped", None);
+        let failed = ProgressReporter::new("Posts failed", None);
         post_ids
             .into_par_iter()
-            .try_for_each(|post_id| convert_post_to_jxl_in_parallel(state, post_id, &progress, &skipped))?;
+            .try_for_each(|post_id| convert_post_to_jxl_in_parallel(state, post_id, &converted, &skipped, &failed))?;
         skipped.report();
+        failed.report();
         Ok(())
     });
 }
@@ -362,8 +364,9 @@ pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
 fn convert_post_to_jxl_in_parallel(
     state: &AppState,
     post_id: i64,
-    progress: &ProgressReporter,
+    converted: &ProgressReporter,
     skipped: &ProgressReporter,
+    failed: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
@@ -375,15 +378,27 @@ fn convert_post_to_jxl_in_parallel(
         .optional()
     {
         Ok(Some(m)) => m,
-        Ok(None) => return Ok(()), // deleted between query and processing
+        Ok(None) => {
+            info!("Post {post_id}: skipped — not found (deleted between query and processing)");
+            return Ok(());
+        }
         Err(err) => {
-            error!("Cannot retrieve MIME type for post {post_id}: {err}");
+            error!("Post {post_id}: failed — cannot retrieve MIME type: {err}");
+            failed.increment();
             return Ok(());
         }
     };
 
-    // Only re-encode still images; skip animation, video, flash, and already-JXL.
-    if mime_type == MimeType::Jxl || PostType::from(mime_type) != PostType::Image {
+    // Skip already-JXL posts.
+    if mime_type == MimeType::Jxl {
+        info!("Post {post_id}: skipped — already JXL");
+        skipped.increment();
+        return Ok(());
+    }
+
+    // Skip non-still-image types (animation, video, flash).
+    if PostType::from(mime_type) != PostType::Image {
+        info!("Post {post_id}: skipped — type is {:?} ({mime_type})", PostType::from(mime_type));
         skipped.increment();
         return Ok(());
     }
@@ -391,17 +406,24 @@ fn convert_post_to_jxl_in_parallel(
     let post_hash = PostHash::new(&state.config, post_id);
     let old_content_path = post_hash.content_path(mime_type);
 
-    // Also skip animated WebP even though its MimeType maps to PostType::Image.
+    // Skip animated WebP (maps to PostType::Image but is an animation).
     if mime_type == MimeType::Webp && transcode::webp_is_animated(&old_content_path) {
+        info!("Post {post_id}: skipped — animated WebP");
         skipped.increment();
         return Ok(());
     }
+
+    // Record original file size for the completion log.
+    let orig_size = std::fs::metadata(&old_content_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     // Decode the original file.
     let decoded = match decode::image(&old_content_path, mime_type) {
         Ok(img) => img,
         Err(err) => {
-            error!("Cannot decode content for post {post_id}: {err}");
+            error!("Post {post_id}: failed — cannot decode {mime_type} content: {err}");
+            failed.increment();
             return Ok(());
         }
     };
@@ -410,7 +432,8 @@ fn convert_post_to_jxl_in_parallel(
     let jxl_bytes = match encode::to_jxl(&decoded, state.config.transcoding.image_quality) {
         Ok(bytes) => bytes,
         Err(err) => {
-            error!("JXL encode failed for post {post_id}: {err}");
+            error!("Post {post_id}: failed — JXL encode error: {err}");
+            failed.increment();
             return Ok(());
         }
     };
@@ -420,7 +443,8 @@ fn convert_post_to_jxl_in_parallel(
     if let Err(err) = filesystem::create_parent_directories(&new_content_path)
         .and_then(|_| std::fs::write(&new_content_path, &jxl_bytes).map_err(Into::into))
     {
-        error!("Cannot write JXL content for post {post_id}: {err}");
+        error!("Post {post_id}: failed — cannot write JXL file: {err}");
+        failed.increment();
         return Ok(());
     }
 
@@ -428,8 +452,9 @@ fn convert_post_to_jxl_in_parallel(
     let (new_checksum, new_md5) = match hash::compute_checksums(&new_content_path) {
         Ok(cs) => cs,
         Err(err) => {
-            error!("Cannot compute checksum for post {post_id}: {err}");
+            error!("Post {post_id}: failed — cannot compute checksum: {err}");
             let _ = std::fs::remove_file(&new_content_path);
+            failed.increment();
             return Ok(());
         }
     };
@@ -450,25 +475,32 @@ fn convert_post_to_jxl_in_parallel(
     });
 
     if let Err(err) = db_result {
-        error!("DB update failed for post {post_id}: {err}");
+        error!("Post {post_id}: failed — database update error: {err}");
         let _ = std::fs::remove_file(&new_content_path);
+        failed.increment();
         return Ok(());
     }
 
     // Remove old content file.
     if let Err(err) = std::fs::remove_file(&old_content_path) {
-        warn!("Could not remove old content for post {post_id}: {err}");
+        warn!("Post {post_id}: converted but could not remove old {mime_type} file: {err}");
     }
 
     // Regenerate thumbnail (delete old format variants first).
     if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
-        warn!("Could not remove old thumbnail for post {post_id}: {err}");
+        warn!("Post {post_id}: converted but could not remove old thumbnail: {err}");
     }
     if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumb, ThumbnailCategory::Generated) {
-        error!("Cannot save thumbnail for post {post_id}: {err}");
+        warn!("Post {post_id}: converted but thumbnail regeneration failed: {err}");
     }
 
-    progress.increment();
+    let new_size = jxl_bytes.len() as u64;
+    let ratio = if orig_size > 0 { new_size * 100 / orig_size } else { 0 };
+    info!(
+        "Post {post_id}: converted {mime_type} → JXL  \
+         ({orig_size} B → {new_size} B, {ratio}% of original)"
+    );
+    converted.increment();
     Ok(())
 }
 
