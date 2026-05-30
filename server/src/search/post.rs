@@ -18,8 +18,11 @@ use crate::{
 use diesel::dsl::{Eq, InnerJoin, InnerJoinOn, IntoBoxed, LeftJoin, Select, count, exists, not, sql};
 use diesel::expression::{SqlLiteral, UncheckedBind};
 use diesel::pg::Pg;
-use diesel::sql_types::{Float, SmallInt};
-use diesel::{ExpressionMethods, JoinOnDsl, PgConnection, QueryDsl, QueryResult, RunQueryDsl, TextExpressionMethods};
+use diesel::sql_types::{BigInt, Float, SmallInt};
+use diesel::{
+    ExpressionMethods, JoinOnDsl, OptionalExtension, PgConnection, QueryDsl, QueryResult, RunQueryDsl,
+    TextExpressionMethods,
+};
 use std::str::FromStr;
 use strum::{Display, EnumIter, EnumString, EnumTable, IntoStaticStr};
 
@@ -86,6 +89,8 @@ pub enum Token {
     #[strum(serialize = "feature-date", serialize = "feature-time")]
     FeatureTime,
     Special,
+    /// Perceptual similarity: `similar:POST_ID[,THRESHOLD]` where THRESHOLD is 1-100 (default 80).
+    Similar,
 }
 
 pub struct QueryBuilder<'a> {
@@ -162,6 +167,7 @@ impl<'a> Builder<'a> for QueryBuilder<'a> {
                 Token::FavTime => apply_favorite_time_filter(conn, query, filter, state),
                 Token::FeatureTime => apply_feature_time_filter(conn, query, filter, state),
                 Token::Special => apply_special_filter(conn, query, self.search.ctx.client, filter, state),
+                Token::Similar => apply_similar_filter(conn, query, filter),
             })?;
         if let Some(nonmatching) = nonmatching_posts {
             update_nonmatching_filter_cache!(conn, nonmatching, self.cache_state)?;
@@ -209,7 +215,12 @@ impl<'a> Builder<'a> for QueryBuilder<'a> {
             Token::CommentTime => apply_sort!(query, post_statistics::last_comment_time, sort),
             Token::FavTime => apply_sort!(query, post_statistics::last_favorite_time, sort),
             Token::FeatureTime => apply_sort!(query, post_statistics::last_feature_time, sort),
-            Token::ContentChecksum | Token::NoteText | Token::PoolCategory | Token::Special | Token::TagCategory => {
+            Token::ContentChecksum
+            | Token::NoteText
+            | Token::PoolCategory
+            | Token::Similar
+            | Token::Special
+            | Token::TagCategory => {
                 unreachable!()
             }
         });
@@ -235,7 +246,12 @@ impl<'a> QueryBuilder<'a> {
         for sort in &search.sorts {
             if matches!(
                 sort.kind,
-                Token::ContentChecksum | Token::NoteText | Token::PoolCategory | Token::Special | Token::TagCategory
+                Token::ContentChecksum
+                    | Token::NoteText
+                    | Token::PoolCategory
+                    | Token::Similar
+                    | Token::Special
+                    | Token::TagCategory
             ) {
                 return Err(ApiError::InvalidSort);
             }
@@ -524,6 +540,58 @@ fn apply_special_filter(
     Ok(query)
 }
 
+/// Filters posts by perceptual similarity to a reference post.
+///
+/// Condition format: `POST_ID[,THRESHOLD]` where THRESHOLD is 1–100 (% similarity, default 80).
+/// Uses `bit_count(phash # ref_phash) <= max_bits` (PostgreSQL 14+ function).
+fn apply_similar_filter(
+    conn: &mut PgConnection,
+    query: BoxedQuery,
+    filter: UnparsedFilter<Token>,
+) -> ApiResult<BoxedQuery> {
+    let (post_id_str, threshold_str) = filter
+        .condition
+        .split_once(',')
+        .unwrap_or((filter.condition, "80"));
+
+    let ref_post_id: i64 = post_id_str.trim().parse().map_err(Box::from)?;
+    let threshold_pct: u32 = threshold_str.trim().parse().map_err(Box::from)?;
+
+    if threshold_pct == 0 || threshold_pct > 100 {
+        return Err(ApiError::from(Box::<dyn std::error::Error + Send + Sync>::from(
+            "similar: threshold must be between 1 and 100",
+        )));
+    }
+
+    let ref_phash: Option<i64> = post::table
+        .find(ref_post_id)
+        .select(post::phash)
+        .first(conn)
+        .optional()?
+        .flatten();
+
+    let Some(ref_phash) = ref_phash else {
+        // Reference post has no pHash — return empty result set
+        return Ok(query.filter(post::id.eq(-1i64)));
+    };
+
+    let max_bits = ((100 - threshold_pct) as f64 * 64.0 / 100.0).floor() as i64;
+
+    let distance = sql::<BigInt>("bit_count(phash # ")
+        .bind::<BigInt, _>(ref_phash)
+        .sql(")");
+
+    Ok(if filter.negated {
+        query
+            .filter(post::phash.is_not_null())
+            .filter(distance.gt(max_bits))
+    } else {
+        query
+            .filter(post::phash.is_not_null())
+            .filter(distance.le(max_bits))
+    })
+}
+
 #[cfg(test)]
 pub fn filter_table() -> TokenTable<&'static str> {
     TokenTable {
@@ -561,5 +629,6 @@ pub fn filter_table() -> TokenTable<&'static str> {
         _fav_time: "-2020..2021",
         _feature_time: "-2020..2022",
         _special: "fav",
+        _similar: "1,80",
     }
 }

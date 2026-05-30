@@ -36,6 +36,7 @@ pub struct NewPost<'a> {
     pub flags: PostFlags,
     pub source: &'a str,
     pub description: &'a str,
+    pub phash: Option<i64>,
 }
 
 #[derive(Clone, AsChangeset, Associations, Identifiable, Queryable, Selectable)]
@@ -61,6 +62,7 @@ pub struct Post {
     pub generated_thumbnail_size: i64,
     pub custom_thumbnail_size: i64,
     pub description: LargeString,
+    pub phash: Option<i64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Associations, Identifiable, Insertable, Queryable, Selectable)]

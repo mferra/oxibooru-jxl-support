@@ -110,6 +110,7 @@ diesel::table! {
         generated_thumbnail_size -> Int8,
         custom_thumbnail_size -> Int8,
         description -> Text,
+        phash -> Nullable<Int8>,
     }
 }
 

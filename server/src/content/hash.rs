@@ -4,6 +4,7 @@ use crate::model::enums::MimeType;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use blake3::KEY_LEN;
+use image::DynamicImage;
 use diesel::deserialize::FromSql;
 use diesel::expression::AsExpression;
 use diesel::pg::{Pg, PgValue};
@@ -191,6 +192,59 @@ pub fn compute_checksums(path: &Path) -> std::io::Result<(Checksum, Md5Checksum)
     let checksum = GenericChecksum(blake3_hasher.finalize().into());
     let md5_checksum = GenericChecksum(md5_ctx.compute().0);
     Ok((checksum, md5_checksum))
+}
+
+/// Computes a DCT-based perceptual hash (pHash) of an image.
+///
+/// Resizes to 32×32 grayscale, applies a 2-D DCT, and encodes the top-left 8×8
+/// coefficients as a 64-bit integer.  Images that look alike will have a low
+/// Hamming distance between their pHash values regardless of format or resolution.
+pub fn compute_phash(image: &DynamicImage) -> i64 {
+    use std::f64::consts::PI;
+    const DCT_SIZE: usize = 32;
+    const HASH_SIZE: usize = 8;
+
+    let small = image
+        .resize_exact(DCT_SIZE as u32, DCT_SIZE as u32, image::imageops::FilterType::Lanczos3)
+        .into_luma8();
+
+    let pixels: Vec<f64> = small.pixels().map(|p| p[0] as f64).collect();
+
+    // DCT applied row-by-row; keep only the first HASH_SIZE horizontal frequencies.
+    let mut row_dct = [0f64; DCT_SIZE * HASH_SIZE];
+    for r in 0..DCT_SIZE {
+        for kx in 0..HASH_SIZE {
+            let mut sum = 0.0f64;
+            for x in 0..DCT_SIZE {
+                sum += pixels[r * DCT_SIZE + x]
+                    * (PI * kx as f64 * (2 * x + 1) as f64 / (2 * DCT_SIZE) as f64).cos();
+            }
+            row_dct[r * HASH_SIZE + kx] = sum;
+        }
+    }
+
+    // DCT applied column-by-column across rows; keep only the first HASH_SIZE vertical frequencies.
+    let mut dct2d = [0f64; HASH_SIZE * HASH_SIZE];
+    for ky in 0..HASH_SIZE {
+        for kx in 0..HASH_SIZE {
+            let mut sum = 0.0f64;
+            for r in 0..DCT_SIZE {
+                sum += row_dct[r * HASH_SIZE + kx]
+                    * (PI * ky as f64 * (2 * r + 1) as f64 / (2 * DCT_SIZE) as f64).cos();
+            }
+            dct2d[ky * HASH_SIZE + kx] = sum;
+        }
+    }
+
+    let mean = dct2d.iter().sum::<f64>() / (HASH_SIZE * HASH_SIZE) as f64;
+
+    let mut hash = 0i64;
+    for (i, &val) in dct2d.iter().enumerate() {
+        if val > mean {
+            hash |= 1i64 << i;
+        }
+    }
+    hash
 }
 
 /// Similar to [`compute_checksum`], except checksum is base64 encoded.
