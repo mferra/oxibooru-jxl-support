@@ -1,0 +1,58 @@
+# Local-build compose file — builds server and client from source.
+# Use this for testing local changes before pushing images to the registry.
+# Production use: docker-compose.yml (pulls pre-built images).
+services:
+  server:
+    build:
+      context: server
+    image: localhost/oxibooru_server:local
+    container_name: oxibooru_server
+    depends_on:
+      - sql
+    environment:
+      POSTGRES_HOST: sql
+      POSTGRES_USER: max
+      POSTGRES_PASSWORD: serenata
+      POSTGRES_DB: oxibooru
+      POSTGRES_PORT: 5432
+      PORT: 3000
+    volumes:
+      - "oxibooru_data:/data:Z"
+      - "./server/config.toml:/opt/app/config.toml:ro,Z"
+    ports:
+      - "6666:6666"
+    stop_signal: SIGINT
+    restart: unless-stopped
+
+  client:
+    build:
+      context: client
+    image: localhost/oxibooru_client:local
+    container_name: oxibooru_client
+    depends_on:
+      - server
+    environment:
+      BACKEND_HOST: server
+      BASE_URL: /
+    volumes:
+      - "oxibooru_data:/data:ro,Z"
+    ports:
+      - "8099:80"
+    restart: unless-stopped
+
+  sql:
+    image: docker.io/postgres:16-alpine
+    container_name: oxibooru_sql
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: max
+      POSTGRES_PASSWORD: serenata
+      POSTGRES_DB: oxibooru
+    volumes:
+      - "oxibooru_postgres:/var/lib/postgresql/data:Z"
+    ports:
+      - "5432:5432"
+
+volumes:
+  oxibooru_data:
+  oxibooru_postgres:
