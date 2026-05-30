@@ -1,54 +1,48 @@
-# Example Docker Compose configuration
-#
-# Use this as a template to set up docker compose, or as guide to set up other
-# orchestration services
 services:
   server:
-    image: oxibooru/server:latest
-    build:
-      context: server
-      args: 
-        # Setting this to `native` can give small performance gains for some 
-        # operations such as reverse search, but makes binary less portable.
-        # Leave blank to let Rust determine the target architecture. 
-        TARGET_CPU:
+    image: docker.io/maurohoracio/oxibooru_server:latest
+    container_name: server
     depends_on:
       - sql
     environment:
-      # These should be the names of the dependent containers listed below,
-      # or FQDNs/IP addresses if these services are running outside of Docker
       POSTGRES_HOST: sql
-      POSTGRES_USER:
-      POSTGRES_PASSWORD:
-      POSTGRES_DB:
-      POSTGRES_PORT:
-      PORT:
+      POSTGRES_USER: max
+      POSTGRES_PASSWORD: serenata
+      POSTGRES_DB: oxibooru
+      POSTGRES_PORT: 5432
+      PORT: 3000
     volumes:
-      - "${MOUNT_DATA}:/data"
-      - "./server/config.toml:/opt/app/config.toml"
+      - "oxibooru_data:/data:Z"
+      - "/home/mauro/Documentos/Develop/oxibooru-jxl-support/server/config.toml:/opt/app/config.toml:ro"
+    ports:
+      - "6666:6666"
     stop_signal: SIGINT
+    restart: unless-stopped
 
   client:
-    image: oxibooru/client:latest
-    build: client
+    image: docker.io/maurohoracio/oxibooru_client:latest
+    container_name: client
     depends_on:
       - server
     environment:
       BACKEND_HOST: server
-      BASE_URL:
     volumes:
-      - "${MOUNT_DATA}:/data:ro"
+      - "oxibooru_data:/data:ro"
     ports:
-      - "${PORT}:80"
-
+      - "8099:80"
+    restart: unless-stopped
   sql:
-    image: postgres:16-alpine
+    image: docker.io/postgres:16-alpine
+    container_name: sql
     restart: unless-stopped
     environment:
-      POSTGRES_USER:
-      POSTGRES_PASSWORD:
-      POSTGRES_DB:
+      POSTGRES_USER: max
+      POSTGRES_PASSWORD: serenata
+      POSTGRES_DB: oxibooru
     volumes:
-      - "${MOUNT_SQL}:/var/lib/postgresql/data"
+      - "oxibooru_postgres:/var/lib/postgresql/data:Z"
     ports:
-      - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+      - "5432:5432"
+volumes:
+  oxibooru_data:
+  oxibooru_postgres:
