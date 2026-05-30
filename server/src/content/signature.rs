@@ -187,8 +187,8 @@ fn compute_column_deltas(image: &GrayImage) -> Vec<u64> {
         let row_start = j * image_width;
         let row = &flat_samples.as_slice()[row_start..row_start + image_width];
 
-        for (delta, &[pixel, next_pixel]) in deltas.iter_mut().zip(row.array_windows()) {
-            *delta += u64::from(pixel.abs_diff(next_pixel));
+        for (delta, window) in deltas.iter_mut().zip(row.windows(2)) {
+            *delta += u64::from(window[0].abs_diff(window[1]));
         }
     }
     deltas

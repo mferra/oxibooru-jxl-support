@@ -132,7 +132,9 @@ fn collect_names(ordered_names: Vec<(i64, SmallString)>) -> HashMap<i64, Arc<[Sm
 
     // Mark boundaries where names belong to single resource
     let mut name_boundaries = vec![0];
-    for (i, &[(curr_id, _), (next_id, _)]) in ordered_names.array_windows().enumerate() {
+    for (i, window) in ordered_names.windows(2).enumerate() {
+        let curr_id = window[0].0;
+        let next_id = window[1].0;
         if next_id != curr_id {
             name_boundaries.push(i + 1);
         }
@@ -143,7 +145,8 @@ fn collect_names(ordered_names: Vec<(i64, SmallString)>) -> HashMap<i64, Arc<[Sm
     let mut name_iter = ordered_names.into_iter();
     let mut names_map: HashMap<i64, Arc<[SmallString]>> = HashMap::new();
     names_map.reserve(name_boundaries.len() - 1);
-    for &[start, end] in name_boundaries.array_windows() {
+    for window in name_boundaries.windows(2) {
+        let (start, end) = (window[0], window[1]);
         let name_count = end - start;
 
         // Create buffer with exact capactiy so that it doesn't need to be reallocated to
