@@ -93,7 +93,7 @@ pub fn save_post_thumbnail(
     match post.config().thumbnails.format {
         ThumbnailFormat::Jpeg => thumbnail.to_rgb8().save(&thumbnail_path)?,
         ThumbnailFormat::Jxl => {
-            let bytes = encode::to_jxl(thumbnail)?;
+            let bytes = encode::to_jxl(thumbnail, post.config().thumbnails.jxl_quality)?;
             std::fs::write(&thumbnail_path, bytes).map_err(ImageError::from)?;
         }
     }

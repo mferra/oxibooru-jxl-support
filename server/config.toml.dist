@@ -45,6 +45,18 @@ avatar_width  = 300
 avatar_height = 300
 post_width    = 300
 post_height   = 300
+# JXL quality for thumbnails (0–100). Only used when format = "jxl".
+# jxl_quality = 75
+
+# On-upload transcoding pipeline.
+# When enabled, static images are stored as JXL and GIF animations as WebP or AV1.
+[transcoding]
+enabled = false
+# JXL encode quality for post content (0–100).
+image_quality = 90
+# Target format for GIF animations: "smallest" (pick smaller of WebP/AV1),
+# "webp" (always WebP), or "av1" (AV1 with WebP fallback).
+animation_format = "smallest"
 
 # Used to send password reset e-mails
 # port, username, and password are optional

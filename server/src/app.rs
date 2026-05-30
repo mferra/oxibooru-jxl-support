@@ -3,6 +3,7 @@ use crate::api::middleware;
 use crate::auth::Client;
 use crate::config::{Action, Config};
 use crate::content::cache::RingCache;
+use crate::content::transcode;
 use crate::db::AsyncConnectionPool;
 use crate::extract::Ctx;
 use crate::{admin, api, config, db, filesystem};
@@ -25,16 +26,20 @@ pub struct AppState {
     pub connection_pool: Arc<AsyncConnectionPool>,
     pub config: Arc<Config>,
     pub content_cache: Arc<Mutex<RingCache>>,
+    /// True when the FFmpeg binary was found to support libaom-av1 at startup.
+    pub av1_supported: bool,
 }
 
 impl AppState {
     pub fn new(connection_pool: AsyncConnectionPool, config: Config) -> Self {
         /// Max number of elements in the content cache. Should be as large as the number of users expected to be uploading concurrently.
         const CONTENT_CACHE_SIZE: usize = 10;
+        let av1_supported = config.transcoding.enabled && transcode::probe_av1_support();
         Self {
             connection_pool: Arc::new(connection_pool),
             config: Arc::new(config),
             content_cache: Arc::new(Mutex::new(RingCache::new(CONTENT_CACHE_SIZE))),
+            av1_supported,
         }
     }
 
@@ -44,6 +49,7 @@ impl AppState {
                 client,
                 config: self.config,
                 content_cache: self.content_cache,
+                av1_supported: self.av1_supported,
             },
             self.connection_pool,
         )
@@ -55,6 +61,8 @@ pub struct Context {
     pub client: Client,
     pub config: Arc<Config>,
     pub content_cache: Arc<Mutex<RingCache>>,
+    /// Mirrors AppState::av1_supported; propagated per-request.
+    pub av1_supported: bool,
 }
 
 impl Context {

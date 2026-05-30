@@ -53,6 +53,67 @@ pub struct ThumbnailConfig {
     pub post_height: u32,
     #[serde(default)]
     pub format: ThumbnailFormat,
+    /// JXL quality for thumbnails (0–100). Only used when format = "jxl".
+    #[serde(default = "ThumbnailConfig::default_jxl_quality")]
+    pub jxl_quality: f32,
+}
+
+impl ThumbnailConfig {
+    fn default_jxl_quality() -> f32 {
+        75.0
+    }
+}
+
+/// Target container for animated GIF transcoding.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimationFormat {
+    /// Encode as both animated WebP and AV1 MP4, keep whichever is smaller.
+    #[default]
+    Smallest,
+    /// Always encode as animated WebP.
+    Webp,
+    /// Encode as AV1 MP4; falls back to WebP when AV1 is unavailable.
+    Av1,
+}
+
+impl AnimationFormat {
+    /// Returns true when AV1 transcoding should be attempted.
+    pub fn use_av1(self, av1_supported: bool) -> bool {
+        match self {
+            Self::Smallest | Self::Av1 => av1_supported,
+            Self::Webp => false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranscodingConfig {
+    /// Set to true to transcode uploaded images to JXL and GIF animations to WebP/AV1.
+    #[serde(default)]
+    pub enabled: bool,
+    /// JXL quality for post content (0–100). Applied to all static image uploads.
+    #[serde(default = "TranscodingConfig::default_image_quality")]
+    pub image_quality: f32,
+    /// Target format for GIF animation transcoding.
+    #[serde(default)]
+    pub animation_format: AnimationFormat,
+}
+
+impl TranscodingConfig {
+    fn default_image_quality() -> f32 {
+        90.0
+    }
+}
+
+impl Default for TranscodingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            image_quality: Self::default_image_quality(),
+            animation_format: AnimationFormat::default(),
+        }
+    }
 }
 
 impl ThumbnailConfig {
@@ -289,6 +350,8 @@ pub struct Config {
     pub smtp: Option<SmtpConfig>,
     pub anonymous_preferences: AnonymousPreferences,
     pub public_info: PublicConfig,
+    #[serde(default)]
+    pub transcoding: TranscodingConfig,
 }
 
 impl Config {
