@@ -5,6 +5,7 @@ use crate::content::encode;
 use crate::content::hash::{Checksum, PostHash};
 use crate::content::signature::SIGNATURE_VERSION;
 use crate::content::thumbnail::{ThumbnailCategory, ThumbnailType};
+use crate::content::transcode;
 use crate::content::{decode, hash, signature, thumbnail};
 use crate::extract::Ctx;
 use crate::filesystem;
@@ -390,6 +391,12 @@ fn convert_post_to_jxl_in_parallel(
     let post_hash = PostHash::new(&state.config, post_id);
     let old_content_path = post_hash.content_path(mime_type);
 
+    // Also skip animated WebP even though its MimeType maps to PostType::Image.
+    if mime_type == MimeType::Webp && transcode::webp_is_animated(&old_content_path) {
+        skipped.increment();
+        return Ok(());
+    }
+
     // Decode the original file.
     let decoded = match decode::image(&old_content_path, mime_type) {
         Ok(img) => img,
@@ -399,8 +406,8 @@ fn convert_post_to_jxl_in_parallel(
         }
     };
 
-    // Encode to JXL.
-    let jxl_bytes = match encode::to_jxl(&decoded) {
+    // Encode to JXL using the quality configured under [transcoding].
+    let jxl_bytes = match encode::to_jxl(&decoded, state.config.transcoding.image_quality) {
         Ok(bytes) => bytes,
         Err(err) => {
             error!("JXL encode failed for post {post_id}: {err}");
@@ -462,6 +469,75 @@ fn convert_post_to_jxl_in_parallel(
     }
 
     progress.increment();
+    Ok(())
+}
+
+/// Computes and stores perceptual hashes for posts that do not yet have one.
+///
+/// Skips posts whose `phash` column is already set.  Safe to run multiple times.
+pub fn compute_phash(state: &AppState, editor: &mut PostEditor) {
+    input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
+        let post_ids = user_query(state, editor)?;
+
+        let _timer = Timer::new("compute_phash");
+        let progress = ProgressReporter::new("pHash computed", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new("Posts skipped (pHash already set)", None);
+        post_ids
+            .into_par_iter()
+            .try_for_each(|post_id| compute_phash_in_parallel(state, post_id, &progress, &skipped))?;
+        skipped.report();
+        Ok(())
+    });
+}
+
+/// Computes and stores the pHash for a single post.  Designed for use in a parallel iterator.
+fn compute_phash_in_parallel(
+    state: &AppState,
+    post_id: i64,
+    progress: &ProgressReporter,
+    skipped: &ProgressReporter,
+) -> AdminResult<()> {
+    admin::is_cancelled()?;
+
+    let mut conn = state.connection_pool.get_blocking()?;
+
+    let (mime_type, existing_phash): (MimeType, Option<i64>) = match post::table
+        .find(post_id)
+        .select((post::mime_type, post::phash))
+        .first(&mut conn)
+        .optional()
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return Ok(()), // deleted between query and processing
+        Err(err) => {
+            error!("Cannot retrieve metadata for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
+
+    if existing_phash.is_some() {
+        skipped.increment();
+        return Ok(());
+    }
+
+    let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let image = match decode::representative_image(&state.config, &content_path, mime_type) {
+        Ok(img) => img,
+        Err(err) => {
+            error!("Cannot decode content for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
+
+    let phash_value = hash::compute_phash(&image);
+
+    match diesel::update(post::table.find(post_id))
+        .set(post::phash.eq(phash_value))
+        .execute(&mut conn)
+    {
+        Ok(_) => progress.increment(),
+        Err(err) => error!("pHash update failed for post {post_id}: {err}"),
+    }
     Ok(())
 }
 
