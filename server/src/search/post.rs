@@ -577,9 +577,11 @@ fn apply_similar_filter(
 
     let max_bits = ((100 - threshold_pct) as f64 * 64.0 / 100.0).floor() as i64;
 
-    let distance = sql::<BigInt>("bit_count(phash # ")
+    // Cast to bit(64) before bit_count so this works on PostgreSQL < 14.
+    // bit_count(bigint) was added in PG 14; bit_count(bit) exists since PG 9.
+    let distance = sql::<BigInt>("bit_count((phash # ")
         .bind::<BigInt, _>(ref_phash)
-        .sql(")");
+        .sql(")::bit(64))");
 
     Ok(if filter.negated {
         query

@@ -229,7 +229,7 @@ The reference post itself is included in results (its own Hamming distance is 0)
 
 Posts where `phash IS NULL` are always excluded from `similar:` results.
 
-> **PostgreSQL 14+ required** for the `bit_count(bigint)` function used by the similarity query.
+> Compatible with PostgreSQL 9+. The similarity query uses `bit_count(bit(64))` which has been available since PostgreSQL 9.
 
 ---
 
