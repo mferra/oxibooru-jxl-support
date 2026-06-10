@@ -201,6 +201,10 @@ For video and animation posts the hash is computed from the representative frame
 
 ### Searching by similarity
 
+On the post detail page, the sidebar has a **Find similar** link with a slider
+(50–100%) — drag it to adjust the threshold and click the link to jump
+straight to a `similar:` search for that post.
+
 Use the `similar:` search token in the post search box or via the API:
 
 ```
