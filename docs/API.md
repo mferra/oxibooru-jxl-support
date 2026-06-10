@@ -170,6 +170,13 @@ also be configured to employ [yt-dlp](https://github.com/yt-dlp/yt-dlp) to
 download content from popular sites such as youtube, gfycat, etc. Access to
 yt-dlp can be configured with the `'uploads:use_downloader'` permission
 
+For security (SSRF protection), only `http`/`https` URLs are accepted, and the
+server refuses to connect to private, loopback, link-local, or other
+non-public addresses (including cloud metadata endpoints) — both for the
+initial URL and for any redirects it follows. Downloads are also subject to a
+maximum size and a request timeout. As a result, `Url`-suffixed fields can only
+point at publicly reachable internet addresses.
+
 Finally, in some cases the user might want to reuse one file between the
 requests to save the bandwidth (for example, reverse search + consecutive
 upload). In this case one should use [temporary file

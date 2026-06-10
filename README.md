@@ -15,6 +15,7 @@ If you're interested in contributing, see the [development guide](docs/DEV.md).
 - **Animated WebP detection** — animated WebP files are correctly classified as `type:animation` instead of `type:image`
 - **On-upload transcoding** — GIF animations → animated WebP or AV1 MP4 (whichever is smaller); static images → JXL (optional, gated by config)
 - **Perceptual hash (pHash)** — DCT-based 64-bit hash for format/resolution-independent duplicate detection; searchable with `similar:POST_ID[,THRESHOLD]`
+- **Hardened URL downloads (SSRF protection)** — `contentUrl` uploads are restricted to `http`/`https`, blocked from reaching private/internal/loopback/link-local addresses (including cloud metadata endpoints), with DNS-rebinding protection, validated redirects, timeouts, and a download size limit
 - Post comments
 - Post descriptions
 - Post notes / annotations, including arbitrary polygons
@@ -233,6 +234,20 @@ Posts where `phash IS NULL` are always excluded from `similar:` results.
 
 ---
 
+## URL Download Security (SSRF Protection)
+
+When a post or avatar is created via `contentUrl` instead of a direct file upload (see [file uploads](docs/API.md#file-uploads)), the server fetches the file on the user's behalf. This fork hardens that fetch against [server-side request forgery](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery) (SSRF):
+
+- **Scheme allowlist** — only `http` and `https` URLs are accepted.
+- **Private/internal address blocking** — the resolved address is checked against loopback, private (RFC 1918), link-local (including the `169.254.169.254` cloud metadata endpoint), multicast, and other non-routable IPv4/IPv6 ranges. Requests to these addresses are rejected.
+- **DNS-rebinding protection** — the validated address is pinned for the connection, so a host can't resolve to a public address during validation and a different (internal) address when the request is actually made.
+- **Validated redirects** — redirects are not followed automatically; each `Location` target is re-validated (scheme + address) before being followed, up to a small limit.
+- **Timeouts and size limit** — connect/request timeouts are enforced, and downloads are capped at the same size as direct uploads (4 GiB).
+
+In practice, this means `contentUrl` can only be used to fetch from public internet addresses — it can no longer reach your own server, other containers on the same Docker network, or other machines on your local network.
+
+---
+
 ## Admin Commands
 
 Start the server in admin mode:
@@ -245,7 +260,7 @@ Start the server in admin mode:
 docker compose run --rm server --admin
 ```
 
-At the prompt, type a task name and press Enter. Leave the post selection blank to operate on all posts, or enter a search query to restrict the operation.
+At the prompt, type a task name and press Enter. Leave the post selection blank to operate on all posts, or enter a search query to restrict the operation (e.g. a tag name like `cat`, or `type:image`).
 
 | Task                    | Description                                                     |
 |-------------------------|-----------------------------------------------------------------|
