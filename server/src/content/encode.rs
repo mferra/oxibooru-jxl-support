@@ -27,7 +27,7 @@ pub fn to_jxl(image: &DynamicImage, quality: f32) -> ImageResult<Vec<u8>> {
     if image.color().has_alpha() {
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
-        let mut encoder = encoder_builder().quality(distance).build().map_err(make_err)?;
+        let mut encoder = encoder_builder().has_alpha(true).quality(distance).build().map_err(make_err)?;
         let frame = EncoderFrame::new(rgba.as_raw()).num_channels(4);
         encoder
             .encode_frame::<u8, u8>(&frame, width, height)
