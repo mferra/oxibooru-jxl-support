@@ -80,6 +80,35 @@ async fn resolve_validated_addr(host: &str, port: u16) -> ApiResult<SocketAddr> 
     addrs.into_iter().next().ok_or_else(|| forbidden_url("Could not resolve host"))
 }
 
+/// Determines the host (for [`Client::resolve`] pinning) and validated address to
+/// connect to for `url`.
+///
+/// IP-literal hosts (e.g. `http://[::1]/`) are validated directly, since
+/// [`tokio::net::lookup_host`] doesn't accept the bracketed form `url::Url::host_str`
+/// returns for IPv6 literals and a literal address doesn't need DNS resolution anyway.
+async fn resolve_target(url: &Url) -> ApiResult<(String, SocketAddr)> {
+    let port = url.port_or_known_default().ok_or_else(|| forbidden_url("URL has no port"))?;
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let addr = resolve_validated_addr(domain, port).await?;
+            Ok((domain.to_owned(), addr))
+        }
+        Some(url::Host::Ipv4(ip)) => {
+            if is_blocked_ip(IpAddr::V4(ip)) {
+                return Err(forbidden_url("URL points to a disallowed address"));
+            }
+            Ok((ip.to_string(), SocketAddr::new(IpAddr::V4(ip), port)))
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if is_blocked_ip(IpAddr::V6(ip)) {
+                return Err(forbidden_url("URL points to a disallowed address"));
+            }
+            Ok((ip.to_string(), SocketAddr::new(IpAddr::V6(ip), port)))
+        }
+        None => Err(forbidden_url("URL has no host")),
+    }
+}
+
 /// Builds a client pinned to `addr` for `host`, with redirects disabled so the caller
 /// can validate each redirect target before following it.
 fn build_client(host: &str, addr: SocketAddr, headers: HeaderMap) -> ApiResult<Client> {
@@ -105,9 +134,7 @@ pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
             return Err(forbidden_url("Only http and https URLs are allowed"));
         }
 
-        let host = url.host_str().ok_or_else(|| forbidden_url("URL has no host"))?.to_owned();
-        let port = url.port_or_known_default().ok_or_else(|| forbidden_url("URL has no port"))?;
-        let addr = resolve_validated_addr(&host, port).await?;
+        let (host, addr) = resolve_target(&url).await?;
 
         let mut headers = HeaderMap::new();
         if add_referer {
@@ -161,4 +188,76 @@ pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
     });
 
     filesystem::save_uploaded_file(config, limited_stream, mime_type).await
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn blocks_ipv4_internal_ranges() {
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), "loopback");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), "private (10/8)");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))), "private (172.16/12)");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))), "private (192.168/16)");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))), "link-local / cloud metadata");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))), "unspecified");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))), "broadcast");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))), "multicast");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))), "documentation (TEST-NET-1)");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))), "shared address space (CGNAT)");
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))), "shared address space (CGNAT)");
+    }
+
+    #[test]
+    fn allows_ipv4_global_addresses() {
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 63, 255, 255))), "just below CGNAT range");
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 0))), "just above CGNAT range");
+    }
+
+    #[test]
+    fn blocks_ipv6_internal_ranges() {
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)), "loopback");
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)), "unspecified");
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))), "unique local (fc00::/7)");
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))), "link-local (fe80::/10)");
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1))), "multicast");
+        // IPv4-mapped addresses must be checked against the embedded IPv4 ranges too.
+        assert!(is_blocked_ip(IpAddr::V6(Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped())), "mapped loopback");
+        assert!(is_blocked_ip(IpAddr::V6(Ipv4Addr::new(169, 254, 169, 254).to_ipv6_mapped())), "mapped metadata");
+    }
+
+    #[test]
+    fn allows_ipv6_global_addresses() {
+        assert!(!is_blocked_ip(IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888))));
+        assert!(!is_blocked_ip(IpAddr::V6(Ipv4Addr::new(8, 8, 8, 8).to_ipv6_mapped())), "mapped global address");
+    }
+
+    #[tokio::test]
+    async fn rejects_disallowed_schemes() {
+        let config = crate::config::test_config(None);
+        for url in ["file:///etc/passwd", "ftp://example.com/file", "gopher://example.com/", "data:text/plain,hi"] {
+            let result = from_url(&config, Url::parse(url).unwrap()).await;
+            assert!(result.is_err(), "{url} should be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_requests_to_internal_addresses() {
+        let config = crate::config::test_config(None);
+        for url in [
+            "http://127.0.0.1/",
+            "http://localhost/",
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata endpoint
+            "http://10.0.0.1/",
+            "http://[::1]/",
+            "http://[fc00::1]/",
+        ] {
+            let result = from_url(&config, Url::parse(url).unwrap()).await;
+            assert!(result.is_err(), "{url} should be rejected");
+        }
+    }
 }
