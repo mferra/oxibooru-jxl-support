@@ -578,7 +578,7 @@ fn user_query(state: &AppState, editor: &mut PostEditor) -> AdminResult<Vec<i64>
         let Ctx(ctx, _) = state.clone().make_context(admin::client());
         let user_input =
             input::read("Select posts (leave blank to select all, enter \"done\" when finished): ", editor)?;
-        match QueryBuilder::new_with_anonymous_token(&ctx, &user_input, Token::Id) {
+        match QueryBuilder::new_with_anonymous_token(&ctx, &user_input, Token::Tag) {
             Err(err) => error!("Could not parse query for reason: {err}"),
             Ok(mut builder) => {
                 let mut conn = state.connection_pool.get_blocking()?;
