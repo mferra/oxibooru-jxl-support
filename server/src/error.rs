@@ -645,6 +645,7 @@ impl ErrorKind for crate::api::error::ApiError {
             Self::InvalidUploadToken => ErrorName::InvalidUploadToken,
             Self::InvalidUserRank => ErrorName::InvalidUserRank,
             Self::Image(err) => err.kind(),
+            Self::JxlConversionUnsupported(_) => ErrorName::UnsupportedFormat,
             Self::JsonRejection(err) => err.kind(),
             Self::JsonSerialization(err) => err.classify().kind(),
             Self::NoEmail => ErrorName::NoEmail,

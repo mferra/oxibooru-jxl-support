@@ -123,5 +123,21 @@
                 </ul>
             </section>
         <% } %>
+
+        <% if (ctx.canRecomputeHash || ctx.canRegenerateThumbnail || ctx.canConvertToJxl) { %>
+            <section class='maintenance'>
+                <ul>
+                    <% if (ctx.canRecomputeHash) { %>
+                        <li><a href class='recompute-phash'>Recalculate perceptual hash</a></li>
+                    <% } %>
+                    <% if (ctx.canRegenerateThumbnail) { %>
+                        <li><a href class='regenerate-thumbnail'>Regenerate thumbnail</a></li>
+                    <% } %>
+                    <% if (ctx.canConvertToJxl) { %>
+                        <li><a href class='convert-to-jxl'>Convert to JPEG XL</a></li>
+                    <% } %>
+                </ul>
+            </section>
+        <% } %>
     </form>
 </div>

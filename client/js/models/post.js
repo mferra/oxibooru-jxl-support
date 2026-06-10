@@ -472,6 +472,57 @@ class Post extends events.EventTarget {
             });
     }
 
+    recomputePhash() {
+        return api
+            .post(uri.formatApiLink("post", this.id, "recompute-phash"))
+            .then((response) => {
+                this._updateFromResponse(response);
+                this.dispatchEvent(
+                    new CustomEvent("change", { detail: { post: this } })
+                );
+                return Promise.resolve();
+            });
+    }
+
+    regenerateThumbnail() {
+        return api
+            .post(uri.formatApiLink("post", this.id, "regenerate-thumbnail"))
+            .then((response) => {
+                this._updateFromResponse(response);
+                this.dispatchEvent(
+                    new CustomEvent("change", { detail: { post: this } })
+                );
+                this.dispatchEvent(
+                    new CustomEvent("changeThumbnail", {
+                        detail: { post: this },
+                    })
+                );
+                return Promise.resolve();
+            });
+    }
+
+    convertToJxl() {
+        return api
+            .post(uri.formatApiLink("post", this.id, "convert-to-jxl"))
+            .then((response) => {
+                this._updateFromResponse(response);
+                this.dispatchEvent(
+                    new CustomEvent("change", { detail: { post: this } })
+                );
+                this.dispatchEvent(
+                    new CustomEvent("changeContent", {
+                        detail: { post: this },
+                    })
+                );
+                this.dispatchEvent(
+                    new CustomEvent("changeThumbnail", {
+                        detail: { post: this },
+                    })
+                );
+                return Promise.resolve();
+            });
+    }
+
     mutateContentUrl() {
         this._contentUrl =
             this._orig._contentUrl +

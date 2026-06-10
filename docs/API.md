@@ -48,6 +48,9 @@ interactively by visiting `<oxibooru_domain>/docs`.
         - [Updating post](#updating-post)
         - [Deleting post](#deleting-post)
         - [Removing post from favorites](#removing-post-from-favorites)
+        - [Recomputing post perceptual hash](#recomputing-post-perceptual-hash)
+        - [Regenerating post thumbnail](#regenerating-post-thumbnail)
+        - [Converting post to JPEG XL](#converting-post-to-jpeg-xl)
     - Pool categories
         - [Listing pool categories](#listing-pool-categories)
         - [Getting pool category](#getting-pool-category)
@@ -1104,6 +1107,65 @@ data.
 - **Description**
 
     Unmarks the post as favorite for authenticated user.
+
+### Recomputing post perceptual hash
+- **Request**
+
+    `POST /post/<id>/recompute-phash`
+
+- **Output**
+
+    A [post resource](#post).
+
+- **Errors**
+
+    - post does not exist
+    - privileges are too low
+
+- **Description**
+
+    Forces recomputation of the post's perceptual hash (`phash`), overwriting any
+    existing value. Administrator only.
+
+### Regenerating post thumbnail
+- **Request**
+
+    `POST /post/<id>/regenerate-thumbnail`
+
+- **Output**
+
+    A [post resource](#post).
+
+- **Errors**
+
+    - post does not exist
+    - privileges are too low
+
+- **Description**
+
+    Regenerates the post's thumbnail from its current content. Administrator only.
+
+### Converting post to JPEG XL
+- **Request**
+
+    `POST /post/<id>/convert-to-jxl`
+
+- **Output**
+
+    A [post resource](#post).
+
+- **Errors**
+
+    - post does not exist
+    - the post cannot be converted to JPEG XL (already JXL, not a still image, or
+      an animated WebP)
+    - privileges are too low
+
+- **Description**
+
+    Re-encodes the post's image content to JPEG XL in-place at the quality set in
+    `[transcoding] image_quality`, updating `mimeType`, checksums, file size, and
+    regenerating the thumbnail. This is irreversible. Administrator only.
 
 ### Listing pool categories
 - **Request**

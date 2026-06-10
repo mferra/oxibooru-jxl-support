@@ -129,6 +129,13 @@ format = "jxl"   # default is "jpeg"
 # jxl_quality = 75  # thumbnail JXL quality (0–100, default 75)
 ```
 
+### Per-post conversion to JXL
+
+In addition to the bulk `convert_posts_to_jxl` admin task, administrators can convert
+a single image post to JXL in-place from the "Maintenance" section of the post edit
+sidebar ("Convert to JPEG XL"). This is irreversible and is unavailable for posts that
+are already JXL, are not still images, or are animated WebP.
+
 ---
 
 ## Animated WebP Detection
@@ -198,6 +205,11 @@ Every post now carries a 64-bit DCT-based perceptual hash. Similar-looking image
 The resulting `i64` is stored in the `post.phash` column (nullable; NULL for pre-existing posts until `calculate_phash` is run). There is **no uniqueness constraint** — the same image in different formats will produce the same hash value, which is intentional.
 
 For video and animation posts the hash is computed from the representative frame (same frame used for thumbnails and reverse-search signatures).
+
+In addition to the bulk `calculate_phash` admin task (which only fills in posts with
+no pHash), administrators can force-recompute the pHash for a single post from the
+"Maintenance" section of the post edit sidebar ("Recalculate perceptual hash"), even
+if the post already has one.
 
 ### Searching by similarity
 

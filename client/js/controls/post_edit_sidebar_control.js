@@ -49,6 +49,11 @@ class PostEditSidebarControl extends events.EventTarget {
                 canDeletePosts: api.hasPrivilege("post_delete"),
                 canFeaturePosts: api.hasPrivilege("post_feature"),
                 canMergePosts: api.hasPrivilege("post_merge"),
+                canRecomputeHash: api.hasPrivilege("post_recompute_hash"),
+                canRegenerateThumbnail: api.hasPrivilege(
+                    "post_regenerate_thumbnail"
+                ),
+                canConvertToJxl: api.hasPrivilege("post_convert_to_jxl"),
             })
         );
 
@@ -187,6 +192,24 @@ class PostEditSidebarControl extends events.EventTarget {
             );
         }
 
+        if (this._recomputePhashLinkNode) {
+            this._recomputePhashLinkNode.addEventListener("click", (e) =>
+                this._evtRecomputePhashClick(e)
+            );
+        }
+
+        if (this._regenerateThumbnailLinkNode) {
+            this._regenerateThumbnailLinkNode.addEventListener("click", (e) =>
+                this._evtRegenerateThumbnailClick(e)
+            );
+        }
+
+        if (this._convertToJxlLinkNode) {
+            this._convertToJxlLinkNode.addEventListener("click", (e) =>
+                this._evtConvertToJxlClick(e)
+            );
+        }
+
         this._postNotesOverlayControl.addEventListener("blur", (e) =>
             this._evtNoteBlur(e)
         );
@@ -306,6 +329,45 @@ class PostEditSidebarControl extends events.EventTarget {
         if (confirm("Are you sure you want to delete this post?")) {
             this.dispatchEvent(
                 new CustomEvent("delete", {
+                    detail: {
+                        post: this._post,
+                    },
+                })
+            );
+        }
+    }
+
+    _evtRecomputePhashClick(e) {
+        e.preventDefault();
+        this.dispatchEvent(
+            new CustomEvent("recomputePhash", {
+                detail: {
+                    post: this._post,
+                },
+            })
+        );
+    }
+
+    _evtRegenerateThumbnailClick(e) {
+        e.preventDefault();
+        this.dispatchEvent(
+            new CustomEvent("regenerateThumbnail", {
+                detail: {
+                    post: this._post,
+                },
+            })
+        );
+    }
+
+    _evtConvertToJxlClick(e) {
+        e.preventDefault();
+        if (
+            confirm(
+                "Convert this post's image to JPEG XL? This cannot be undone."
+            )
+        ) {
+            this.dispatchEvent(
+                new CustomEvent("convertToJxl", {
                     detail: {
                         post: this._post,
                     },
@@ -532,6 +594,20 @@ class PostEditSidebarControl extends events.EventTarget {
 
     get _deleteLinkNode() {
         return this._formNode.querySelector(".management .delete");
+    }
+
+    get _recomputePhashLinkNode() {
+        return this._formNode.querySelector(".maintenance .recompute-phash");
+    }
+
+    get _regenerateThumbnailLinkNode() {
+        return this._formNode.querySelector(
+            ".maintenance .regenerate-thumbnail"
+        );
+    }
+
+    get _convertToJxlLinkNode() {
+        return this._formNode.querySelector(".maintenance .convert-to-jxl");
     }
 
     get _addNoteLinkNode() {

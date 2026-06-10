@@ -206,6 +206,9 @@ pub enum Action {
     PostBulkEditTag,
     PostBulkEditSafety,
     PostBulkEditDelete,
+    PostRecomputeHash,
+    PostRegenerateThumbnail,
+    PostConvertToJxl,
 
     TagCreate,
     TagEditName,

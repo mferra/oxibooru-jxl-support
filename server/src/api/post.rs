@@ -51,6 +51,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(merge))
         .routes(routes!(favorite, unfavorite))
         .routes(routes!(rate))
+        .routes(routes!(recompute_phash))
+        .routes(routes!(regenerate_thumbnail))
+        .routes(routes!(convert_to_jxl))
         .merge(upload_capable_routes)
 }
 
@@ -1276,6 +1279,106 @@ async fn unfavorite(
         .map(Json)
 }
 
+/// Recomputes the perceptual hash of a post, overwriting any existing value.
+#[utoipa::path(
+    post,
+    path = "/post/{id}/recompute-phash",
+    tag = POST_TAG,
+    params(
+        ("id" = i64, Path, description = "Post ID"),
+        ResourceParams,
+    ),
+    responses(
+        (status = 200, body = PostInfo),
+        (status = 403, description = "Privileges are too low"),
+        (status = 404, description = "Post does not exist"),
+    ),
+)]
+async fn recompute_phash(
+    Ctx(ctx, connection_pool): Ctx,
+    Path(post_id): Path<i64>,
+    Query(params): Query<ResourceParams>,
+) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostRecomputeHash)?;
+    let fields = resource::create_table(params.fields()).map_err(Box::from)?;
+
+    let config = Arc::clone(&ctx.config);
+    connection_pool
+        .transaction(move |conn| update::post::recompute_phash(&config, conn, post_id))
+        .await?;
+    connection_pool
+        .transaction(move |conn| PostInfo::new_from_id(conn, &ctx, post_id, &fields))
+        .await
+        .map(Json)
+}
+
+/// Regenerates the thumbnail of a post from its current content.
+#[utoipa::path(
+    post,
+    path = "/post/{id}/regenerate-thumbnail",
+    tag = POST_TAG,
+    params(
+        ("id" = i64, Path, description = "Post ID"),
+        ResourceParams,
+    ),
+    responses(
+        (status = 200, body = PostInfo),
+        (status = 403, description = "Privileges are too low"),
+        (status = 404, description = "Post does not exist"),
+    ),
+)]
+async fn regenerate_thumbnail(
+    Ctx(ctx, connection_pool): Ctx,
+    Path(post_id): Path<i64>,
+    Query(params): Query<ResourceParams>,
+) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostRegenerateThumbnail)?;
+    let fields = resource::create_table(params.fields()).map_err(Box::from)?;
+
+    let config = Arc::clone(&ctx.config);
+    connection_pool
+        .transaction(move |conn| update::post::regenerate_thumbnail(&config, conn, post_id))
+        .await?;
+    connection_pool
+        .transaction(move |conn| PostInfo::new_from_id(conn, &ctx, post_id, &fields))
+        .await
+        .map(Json)
+}
+
+/// Converts a post's image content to JPEG XL in-place.
+#[utoipa::path(
+    post,
+    path = "/post/{id}/convert-to-jxl",
+    tag = POST_TAG,
+    params(
+        ("id" = i64, Path, description = "Post ID"),
+        ResourceParams,
+    ),
+    responses(
+        (status = 200, body = PostInfo),
+        (status = 403, description = "Privileges are too low"),
+        (status = 404, description = "Post does not exist"),
+        (status = 422, description = "Post cannot be converted to JXL"),
+    ),
+)]
+async fn convert_to_jxl(
+    Ctx(ctx, connection_pool): Ctx,
+    Path(post_id): Path<i64>,
+    Query(params): Query<ResourceParams>,
+) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostConvertToJxl)?;
+    let fields = resource::create_table(params.fields()).map_err(Box::from)?;
+
+    let config = Arc::clone(&ctx.config);
+    connection_pool
+        .transaction(move |conn| update::post::convert_to_jxl(&config, conn, post_id))
+        .await?;
+    connection_pool
+        .transaction(move |conn| PostInfo::new_from_id(conn, &ctx, post_id, &fields))
+        .await
+        .map(Json)
+}
+
 fn verify_visibility(conn: &mut PgConnection, ctx: &Context, post_id: i64) -> ApiResult<()> {
     let post_exists: bool = diesel::select(exists(post::table.find(post_id))).first(conn)?;
     if !post_exists {
@@ -1512,6 +1615,77 @@ mod test {
         assert_eq!(new_admin_favorite_count, admin_favorite_count);
         assert_eq!(new_last_edit_time, last_edit_time);
         Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial]
+    async fn recompute_phash() -> ApiResult<()> {
+        const POST_ID: i64 = 4;
+        let mut conn = get_connection()?;
+        let phash_before: Option<i64> = post::table.find(POST_ID).select(post::phash).first(&mut conn)?;
+        assert_eq!(phash_before, None);
+
+        verify_response(&format!("POST /post/{POST_ID}/recompute-phash/?{FIELDS}"), "post/recompute_phash").await?;
+
+        let phash_after: Option<i64> = post::table.find(POST_ID).select(post::phash).first(&mut conn)?;
+        assert!(phash_after.is_some());
+
+        diesel::update(post::table.find(POST_ID))
+            .set(post::phash.eq::<Option<i64>>(None))
+            .execute(&mut conn)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn recompute_phash_insufficient_privileges() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Power, &format!("POST /post/4/recompute-phash/?{FIELDS}"), "post/recompute_phash_denied")
+            .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial]
+    async fn regenerate_thumbnail() -> ApiResult<()> {
+        const POST_ID: i64 = 4;
+        verify_response(&format!("POST /post/{POST_ID}/regenerate-thumbnail/?{FIELDS}"), "post/regenerate_thumbnail").await
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn regenerate_thumbnail_insufficient_privileges() -> ApiResult<()> {
+        verify_response_with_user(
+            UserRank::Power,
+            &format!("POST /post/4/regenerate-thumbnail/?{FIELDS}"),
+            "post/regenerate_thumbnail_denied",
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial]
+    async fn convert_to_jxl() -> ApiResult<()> {
+        const POST_ID: i64 = 4;
+        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl").await?;
+        reset_database();
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn convert_to_jxl_insufficient_privileges() -> ApiResult<()> {
+        verify_response_with_user(
+            UserRank::Power,
+            &format!("POST /post/4/convert-to-jxl/?{FIELDS}"),
+            "post/convert_to_jxl_denied",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn convert_to_jxl_unsupported() -> ApiResult<()> {
+        const POST_ID: i64 = 5;
+        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl_unsupported").await
     }
 
     #[tokio::test]

@@ -1,11 +1,12 @@
-use crate::api::error::{self, ApiResult};
+use crate::api::error::{self, ApiError, ApiResult};
 use crate::app::Context;
 use crate::config::Config;
 use crate::content::hash::PostHash;
-use crate::content::thumbnail::ThumbnailCategory;
+use crate::content::thumbnail::{ThumbnailCategory, ThumbnailType};
+use crate::content::{decode, encode, hash, transcode, thumbnail};
 use crate::filesystem;
 use crate::model::comment::NewComment;
-use crate::model::enums::{ResourceProperty, ResourceType};
+use crate::model::enums::{MimeType, PostType, ResourceProperty, ResourceType};
 use crate::model::pool::PoolPost;
 use crate::model::post::{
     CompressedSignature, NewPostFeature, Post, PostFavorite, PostRelation, PostScore, PostTag, SignatureIndexes,
@@ -18,9 +19,10 @@ use crate::schema::{
 use crate::search::preferences;
 use crate::time::DateTime;
 use diesel::dsl::exists;
-use diesel::{ExpressionMethods, Insertable, PgConnection, QueryDsl, QueryResult, RunQueryDsl};
+use diesel::{ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, QueryResult, RunQueryDsl};
 use image::DynamicImage;
 use std::collections::HashSet;
+use tracing::warn;
 
 /// Updates `last_edit_time` of post associated with `post_id`.
 pub fn last_edit_time(conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
@@ -325,5 +327,107 @@ pub fn merge(
         filesystem::delete_post(&absorbed_hash, deleted_content_type)?;
     }
     last_edit_time(conn, merge_to_id)?;
+    Ok(())
+}
+
+/// Recomputes and stores the perceptual hash for a post, overwriting any existing value.
+pub fn recompute_phash(config: &Config, conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
+    let mime_type: MimeType = post::table
+        .find(post_id)
+        .select(post::mime_type)
+        .first(conn)
+        .optional()?
+        .ok_or(ApiError::NotFound(ResourceType::Post))?;
+
+    let content_path = PostHash::new(config, post_id).content_path(mime_type);
+    let image = decode::representative_image(config, &content_path, mime_type)?;
+    let phash_value = hash::compute_phash(&image);
+
+    diesel::update(post::table.find(post_id))
+        .set(post::phash.eq(phash_value))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Regenerates the thumbnail for a post from its current content.
+pub fn regenerate_thumbnail(config: &Config, conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
+    let mime_type: MimeType = post::table
+        .find(post_id)
+        .select(post::mime_type)
+        .first(conn)
+        .optional()?
+        .ok_or(ApiError::NotFound(ResourceType::Post))?;
+
+    let post_hash = PostHash::new(config, post_id);
+    let content_path = post_hash.content_path(mime_type);
+    let image = decode::representative_image(config, &content_path, mime_type)?;
+    let thumb = thumbnail::create(config, &image, ThumbnailType::Post);
+    thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated)
+}
+
+/// Converts a post's image content to JPEG XL in-place, updating mime_type, checksums,
+/// file_size, and regenerating the thumbnail.
+///
+/// Returns `ApiError::JxlConversionUnsupported` if the post is already JXL, is not a
+/// still image, or is an animated WebP.
+pub fn convert_to_jxl(config: &Config, conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
+    let mime_type: MimeType = post::table
+        .find(post_id)
+        .select(post::mime_type)
+        .first(conn)
+        .optional()?
+        .ok_or(ApiError::NotFound(ResourceType::Post))?;
+
+    if mime_type == MimeType::Jxl || PostType::from(mime_type) != PostType::Image {
+        return Err(ApiError::JxlConversionUnsupported(mime_type));
+    }
+
+    let post_hash = PostHash::new(config, post_id);
+    let old_content_path = post_hash.content_path(mime_type);
+    if mime_type == MimeType::Webp && transcode::webp_is_animated(&old_content_path) {
+        return Err(ApiError::JxlConversionUnsupported(mime_type));
+    }
+
+    let decoded = decode::image(&old_content_path, mime_type)?;
+    let jxl_bytes = encode::to_jxl(&decoded, config.transcoding.image_quality)?;
+
+    let new_content_path = post_hash.content_path(MimeType::Jxl);
+    filesystem::create_parent_directories(&new_content_path)?;
+    std::fs::write(&new_content_path, &jxl_bytes)?;
+
+    let (new_checksum, new_md5) = match hash::compute_checksums(&new_content_path) {
+        Ok(checksums) => checksums,
+        Err(err) => {
+            let _ = std::fs::remove_file(&new_content_path);
+            return Err(err.into());
+        }
+    };
+
+    if let Err(err) = diesel::update(post::table.find(post_id))
+        .set((
+            post::mime_type.eq(MimeType::Jxl),
+            post::checksum.eq(new_checksum.as_ref()),
+            post::checksum_md5.eq(new_md5.as_ref()),
+            post::file_size.eq(jxl_bytes.len() as i64),
+        ))
+        .execute(conn)
+    {
+        let _ = std::fs::remove_file(&new_content_path);
+        return Err(err.into());
+    }
+
+    // Best-effort cleanup/regen, matching admin CLI semantics: the critical mime/checksum
+    // update above has already succeeded, so failures here are logged, not propagated
+    // (the "Regenerate thumbnail" action remains available as a fallback).
+    if let Err(err) = std::fs::remove_file(&old_content_path) {
+        warn!("Post {post_id}: converted but could not remove old {mime_type} file: {err}");
+    }
+    let thumb = thumbnail::create(config, &decoded, ThumbnailType::Post);
+    if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
+        warn!("Post {post_id}: converted but could not remove old thumbnail: {err}");
+    }
+    if let Err(err) = thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated) {
+        warn!("Post {post_id}: converted but thumbnail regeneration failed: {err}");
+    }
     Ok(())
 }

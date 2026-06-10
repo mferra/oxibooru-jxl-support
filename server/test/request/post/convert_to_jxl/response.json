@@ -1,0 +1,53 @@
+{
+    "id": 4,
+    "user": {
+        "name": "regular_user",
+        "avatarUrl": "https://gravatar.com/avatar/8bfcaeb7285823c32541860cca686268214e8280602eb3c4ffec3fc52981b1dc?d=retro&s=300"
+    },
+    "fileSize": 66,
+    "canvasWidth": 1,
+    "canvasHeight": 1,
+    "safety": "safe",
+    "type": "image",
+    "mimeType": "image/jxl",
+    "checksum": "e0a48b155320ef5f388f2a1735fb371eee944449f3c2f65b757d78457aafe372",
+    "checksumMD5": "4108685ee0db5c5d8c0f4b17bb9881e5",
+    "flags": [],
+    "source": "1_pixel.png",
+    "description": "description9000",
+    "contentUrl": "data/posts/000000/00/4_78-cbid-2Ci2jMEqspr2LjF8OTP0kQUVVlCb53twMRw.jxl",
+    "thumbnailUrl": "data/generated-thumbnails/000000/00/4_78-cbid-2Ci2jMEqspr2LjF8OTP0kQUVVlCb53twMRw.jpg",
+    "tags": [],
+    "relations": [
+        {
+            "id": 5,
+            "thumbnailUrl": "data/generated-thumbnails/000000/00/5_XS2ZX-uHHTLh3wlyUa6flx3l0Mfp35ZVt1kbbBKFCsA.jpg"
+        }
+    ],
+    "pools": [
+        {
+            "id": 5,
+            "names": ["abstract"],
+            "category": "Style",
+            "description": "",
+            "postCount": 1
+        }
+    ],
+    "notes": [],
+    "score": 0,
+    "ownScore": -1,
+    "ownFavorite": false,
+    "tagCount": 0,
+    "commentCount": 1,
+    "relationCount": 1,
+    "noteCount": 0,
+    "favoriteCount": 1,
+    "featureCount": 1,
+    "favoritedBy": [
+        {
+            "name": "regular_user",
+            "avatarUrl": "https://gravatar.com/avatar/8bfcaeb7285823c32541860cca686268214e8280602eb3c4ffec3fc52981b1dc?d=retro&s=300"
+        }
+    ],
+    "hasCustomThumbnail": false
+}

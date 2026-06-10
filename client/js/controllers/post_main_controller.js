@@ -105,6 +105,18 @@ class PostMainController extends BasePostController {
                     this._view.sidebarControl.addEventListener("merge", (e) =>
                         this._evtMergePost(e)
                     );
+                    this._view.sidebarControl.addEventListener(
+                        "recomputePhash",
+                        (e) => this._evtRecomputePhash(e)
+                    );
+                    this._view.sidebarControl.addEventListener(
+                        "regenerateThumbnail",
+                        (e) => this._evtRegenerateThumbnail(e)
+                    );
+                    this._view.sidebarControl.addEventListener(
+                        "convertToJxl",
+                        (e) => this._evtConvertToJxl(e)
+                    );
                 }
 
                 if (this._view.commentControl) {
@@ -167,6 +179,57 @@ class PostMainController extends BasePostController {
 
     _evtMergePost(e) {
         router.show(uri.formatClientLink("post", e.detail.post.id, "merge"));
+    }
+
+    _evtRecomputePhash(e) {
+        this._view.sidebarControl.disableForm();
+        this._view.sidebarControl.clearMessages();
+        e.detail.post.recomputePhash().then(
+            () => {
+                this._view.sidebarControl.showSuccess(
+                    "Perceptual hash recalculated."
+                );
+                this._view.sidebarControl.enableForm();
+            },
+            (error) => {
+                this._view.sidebarControl.showError(error.message);
+                this._view.sidebarControl.enableForm();
+            }
+        );
+    }
+
+    _evtRegenerateThumbnail(e) {
+        this._view.sidebarControl.disableForm();
+        this._view.sidebarControl.clearMessages();
+        e.detail.post.regenerateThumbnail().then(
+            () => {
+                this._view.sidebarControl.showSuccess(
+                    "Thumbnail regenerated."
+                );
+                this._view.sidebarControl.enableForm();
+            },
+            (error) => {
+                this._view.sidebarControl.showError(error.message);
+                this._view.sidebarControl.enableForm();
+            }
+        );
+    }
+
+    _evtConvertToJxl(e) {
+        this._view.sidebarControl.disableForm();
+        this._view.sidebarControl.clearMessages();
+        e.detail.post.convertToJxl().then(
+            () => {
+                this._view.sidebarControl.showSuccess(
+                    "Post converted to JPEG XL."
+                );
+                this._view.sidebarControl.enableForm();
+            },
+            (error) => {
+                this._view.sidebarControl.showError(error.message);
+                this._view.sidebarControl.enableForm();
+            }
+        );
     }
 
     _evtDeletePost(e) {

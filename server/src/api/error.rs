@@ -58,6 +58,8 @@ pub enum ApiError {
     #[error("Cannot create an anonymous user")]
     InvalidUserRank,
     Image(#[from] image::ImageError),
+    #[error("Post cannot be converted to JPEG XL (mime type: {0})")]
+    JxlConversionUnsupported(MimeType),
     JsonRejection(#[from] axum::extract::rejection::JsonRejection),
     JsonSerialization(#[from] serde_json::Error),
     #[error("Missing {0} content")]
@@ -135,6 +137,7 @@ impl ApiError {
             | Self::InvalidTime(_)
             | Self::InvalidUploadToken
             | Self::InvalidUserRank
+            | Self::JxlConversionUnsupported(_)
             | Self::NoEmail
             | Self::NoNamesGiven(_)
             | Self::NotAnInteger(_)
@@ -187,6 +190,7 @@ impl ApiError {
             Self::InvalidUploadToken => "Invalid Upload Token",
             Self::InvalidUserRank => "Invalid User Rank",
             Self::Image(_) => "Image Error",
+            Self::JxlConversionUnsupported(_) => "JXL Conversion Unsupported",
             Self::JsonRejection(_) => "JSON Rejection",
             Self::JsonSerialization(_) => "JSON Serialization Error",
             Self::MissingContent(_) => "Missing Content",
