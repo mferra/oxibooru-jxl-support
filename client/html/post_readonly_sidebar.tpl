@@ -45,6 +45,16 @@
             <a href class='fit-both'>both</a>
         </section>
 
+        <section class='find-similar'>
+            <a href='<%- ctx.formatClientLink("posts", {query: "similar:" + ctx.post.id + ",80"}) %>' class='find-similar-link'>
+                <i class='fa fa-clone'></i> Find similar
+            </a>
+            <div class='find-similar-slider'>
+                <input type='range' class='find-similar-threshold' min='50' max='100' step='1' value='80'>
+                <span class='find-similar-value'>80%</span>
+            </div>
+        </section>
+
         <% if (ctx.post.source) { %>
             <section class='source'>
                 Source: <% for (let i = 0; i < ctx.post.sourceSplit.length; i++) { %>

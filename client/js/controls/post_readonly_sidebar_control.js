@@ -38,6 +38,7 @@ class PostReadonlySidebarControl extends events.EventTarget {
         this._installScore();
         this._installFitButtons();
         this._syncFitButton();
+        this._installFindSimilar();
     }
 
     get _scoreContainerNode() {
@@ -78,6 +79,18 @@ class PostReadonlySidebarControl extends events.EventTarget {
 
     get _fitHeightButtonNode() {
         return this._hostNode.querySelector(".fit-height");
+    }
+
+    get _findSimilarLinkNode() {
+        return this._hostNode.querySelector(".find-similar-link");
+    }
+
+    get _findSimilarThresholdNode() {
+        return this._hostNode.querySelector(".find-similar-threshold");
+    }
+
+    get _findSimilarValueNode() {
+        return this._hostNode.querySelector(".find-similar-value");
     }
 
     _installFitButtons() {
@@ -175,6 +188,23 @@ class PostReadonlySidebarControl extends events.EventTarget {
             oldNode.classList.remove("active");
         }
         newNode.classList.add("active");
+    }
+
+    _installFindSimilar() {
+        this._findSimilarThresholdNode.addEventListener("input", (e) =>
+            this._evtFindSimilarThresholdChange(e)
+        );
+    }
+
+    _evtFindSimilarThresholdChange(e) {
+        const threshold = e.target.value;
+        this._findSimilarValueNode.textContent = `${threshold}%`;
+        this._findSimilarLinkNode.setAttribute(
+            "href",
+            uri.formatClientLink("posts", {
+                query: `similar:${this._post.id},${threshold}`,
+            })
+        );
     }
 
     _evtAddToFavoritesClick(e) {
