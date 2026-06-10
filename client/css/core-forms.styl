@@ -152,7 +152,9 @@ input[type=date],
 input[type=time]
     vertical-align: top
     font-family: 'Droid Sans', sans-serif
-    font-size: 100%
+    /* 1rem (not 100%) so this stays >=16px even when the body's font-size
+       shrinks on narrow viewports, preventing iOS Safari's zoom-on-focus */
+    font-size: 1rem
     padding: 0.2em 0.3em
     box-sizing: border-box
     border: 2px solid $input-enabled-border-color
@@ -197,7 +199,9 @@ input[type=password],
 input[type=number]
     vertical-align: top
     font-family: 'Droid Sans', sans-serif
-    font-size: 100%
+    /* 1rem (not 100%) so this stays >=16px even when the body's font-size
+       shrinks on narrow viewports, preventing iOS Safari's zoom-on-focus */
+    font-size: 1rem
     padding: 0.2em 0.3em
     text-overflow: ellipsis
     width: 100%

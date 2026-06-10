@@ -181,3 +181,35 @@ $cancel-button-color = tomato
         color: $inactive-link-color-darktheme
     &:last-child .move-down
         color: $inactive-link-color-darktheme
+
+/* On narrow screens the fixed-width float-and-negative-margin layout used above
+   leaves almost no room for the uploadable's header/body, so stack the thumbnail
+   on top and let everything else use the full width instead. */
+@media (max-width: 700px)
+    #post-upload .uploadables-container .uploadable-container
+        padding-left: 0
+
+        &>.thumbnail-wrapper
+            float: none
+            width: 100%
+            height: 40vw
+            max-height: 12em
+            margin: 0 0 0.75em 0
+
+        .uploadable .body .lookalikes li
+            padding-left: 0
+
+            .thumbnail-wrapper
+                float: none
+                width: 100%
+                height: 30vw
+                max-height: 8em
+                margin: 0 0 0.5em 0
+
+            .description
+                display: block
+                margin: 0 0 0.5em 0
+
+            .controls
+                float: none
+                display: block
