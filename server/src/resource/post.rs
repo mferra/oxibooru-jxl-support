@@ -2,6 +2,7 @@ use crate::app::Context;
 use crate::auth::Client;
 use crate::config::Config;
 use crate::content::hash::PostHash;
+use crate::filesystem::Directory;
 use crate::get_post_stats;
 use crate::model::comment::Comment;
 use crate::model::enums::{AvatarStyle, MimeType, PostFlags, PostSafety, PostType, Rating, Score};
@@ -30,6 +31,7 @@ use serde_with::skip_serializing_none;
 use server_macros::non_nullable_options;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use strum::{EnumString, EnumTable};
 use utoipa::ToSchema;
@@ -239,10 +241,20 @@ impl PostInfo {
             Ok::<_, Infallible>(get_content_urls(&ctx.config, &posts))
         })
         .expect("get_content_urls is infallible");
+        let custom_thumbnail_exists = resource::retrieve(
+            fields[Field::ThumbnailUrl] || fields[Field::HasCustomThumbnail],
+            || Ok::<_, Infallible>(custom_thumbnails_exist(&ctx.config, &posts)),
+        )
+        .expect("custom_thumbnails_exist is infallible");
         let mut thumbnail_urls = resource::retrieve(fields[Field::ThumbnailUrl], || {
-            Ok::<_, Infallible>(get_thumbnail_urls(&ctx.config, &posts))
+            Ok::<_, Infallible>(get_thumbnail_urls(&ctx.config, &posts, &custom_thumbnail_exists))
         })
         .expect("get_thumbnail_urls is infallible");
+        let mut has_custom_thumbnails = if fields[Field::HasCustomThumbnail] {
+            custom_thumbnail_exists
+        } else {
+            Vec::new()
+        };
         let mut tags = resource::retrieve(fields[Field::Tags], || get_tags(conn, &posts))?;
         let mut comments = resource::retrieve(fields[Field::Comments], || get_comments(conn, ctx, &posts))?;
         let mut relations = resource::retrieve(fields[Field::Relations], || get_relations(conn, ctx, &posts))?;
@@ -291,6 +303,7 @@ impl PostInfo {
         resource::check_batch_results(batch_size, feature_counts.len());
         resource::check_batch_results(batch_size, last_feature_times.len());
         resource::check_batch_results(batch_size, users_who_favorited.len());
+        resource::check_batch_results(batch_size, has_custom_thumbnails.len());
 
         let mut results = posts
             .into_iter()
@@ -331,7 +344,7 @@ impl PostInfo {
                 comments: comments.pop(),
                 pools: pools.pop(),
                 has_custom_thumbnail: fields[Field::HasCustomThumbnail]
-                    .then(|| PostHash::new(&ctx.config, post.id).custom_thumbnail_path().exists()),
+                    .then(|| has_custom_thumbnails.pop().expect("size checked above")),
             })
             .collect::<Vec<_>>();
         results.reverse();
@@ -374,10 +387,43 @@ fn get_content_urls(config: &Config, posts: &[Post]) -> Vec<String> {
         .collect()
 }
 
-fn get_thumbnail_urls(config: &Config, posts: &[Post]) -> Vec<String> {
+fn get_thumbnail_urls(config: &Config, posts: &[Post], custom_thumbnail_exists: &[bool]) -> Vec<String> {
     posts
         .iter()
-        .map(|post| PostHash::new(config, post.id).thumbnail_url())
+        .zip(custom_thumbnail_exists)
+        .map(|(post, &has_custom)| PostHash::new(config, post.id).thumbnail_url_with_custom(has_custom))
+        .collect()
+}
+
+/// Checks, for each post, whether a custom thumbnail exists on disk.
+///
+/// Posts are stored in bucketed subdirectories (see [`PostHash::bucket_location`]), so posts
+/// in the same batch typically share only a handful of directories. This lists each distinct
+/// bucket directory once and checks membership in-memory, instead of doing one `exists()`
+/// filesystem call per post.
+fn custom_thumbnails_exist(config: &Config, posts: &[Post]) -> Vec<bool> {
+    let ext = config.thumbnails.format.extension();
+    let base_dir = config.path(Directory::CustomThumbnails);
+
+    let mut dir_listings: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    posts
+        .iter()
+        .map(|post| {
+            let (bucket_dir, filename_stem) = PostHash::new(config, post.id).bucket_location();
+            let dir_path = base_dir.join(&bucket_dir);
+            let filename = format!("{filename_stem}.{ext}");
+            let listing = dir_listings.entry(dir_path).or_insert_with_key(|dir_path| {
+                std::fs::read_dir(dir_path)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|entry| entry.ok())
+                            .filter_map(|entry| entry.file_name().into_string().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            listing.contains(&filename)
+        })
         .collect()
 }
 

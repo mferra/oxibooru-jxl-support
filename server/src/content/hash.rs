@@ -54,13 +54,30 @@ impl<'a> PostHash<'a> {
     /// a custom thumbnail if it exists.
     pub fn thumbnail_url(&self) -> String {
         // Note: this requires interacting with the filesystem and might be slow
-        let thumbnail_folder = if self.custom_thumbnail_path().exists() {
+        self.thumbnail_url_with_custom(self.custom_thumbnail_path().exists())
+    }
+
+    /// Returns URL to post thumbnail, given whether a custom thumbnail exists.
+    /// Prefer this over [`Self::thumbnail_url`] when batching over many posts, since
+    /// the caller can determine `has_custom_thumbnail` for the whole batch with far
+    /// fewer filesystem accesses than one `exists()` check per post.
+    pub fn thumbnail_url_with_custom(&self, has_custom_thumbnail: bool) -> String {
+        let thumbnail_folder = if has_custom_thumbnail {
             Directory::CustomThumbnails
         } else {
             Directory::GeneratedThumbnails
         };
         let ext = self.config.thumbnails.format.extension();
         format!("{}/{thumbnail_folder}/{self}.{ext}", self.config.data_url)
+    }
+
+    /// Returns the bucketed subdirectory and filename stem (without extension) used to
+    /// store this post's content and thumbnails on disk.
+    pub fn bucket_location(&self) -> (PathBuf, String) {
+        let outer_bucket = self.post_id / 1_000_000;
+        let inner_bucket = (self.post_id / 10_000) % 100;
+        let dir = PathBuf::from(format!("{outer_bucket:06}")).join(format!("{inner_bucket:02}"));
+        (dir, format!("{}_{}", self.post_id, self.hash))
     }
 
     /// Returns path to post content on disk.
