@@ -43,25 +43,27 @@ impl From<String> for AdminError {
 
 impl From<PoolError> for AdminError {
     fn from(value: PoolError) -> Self {
-        Self::Error(value.to_string())
+        Self::Error(format!(
+            "Could not get a database connection: {value}. Check that the database is running and reachable."
+        ))
     }
 }
 
 impl From<diesel::result::Error> for AdminError {
     fn from(value: diesel::result::Error) -> Self {
-        Self::Error(value.to_string())
+        Self::Error(format!("Database query failed: {value}"))
     }
 }
 
 impl From<std::io::Error> for AdminError {
     fn from(value: std::io::Error) -> Self {
-        Self::Error(value.to_string())
+        Self::Error(format!("Filesystem error: {value}"))
     }
 }
 
 impl From<walkdir::Error> for AdminError {
     fn from(value: walkdir::Error) -> Self {
-        Self::Error(value.to_string())
+        Self::Error(format!("Error while scanning data directory: {value}"))
     }
 }
 
@@ -124,7 +126,7 @@ pub fn command_line_mode(state: &AppState) {
 
         let task = AdminTask::from_str(&user_input).map_err(|_| {
             let possible_arguments: Vec<&str> = AdminTask::iter().map(AdminTask::into).collect();
-            format!("Command line arguments must be one of {possible_arguments:?}")
+            format!("Unknown task \"{user_input}\". Valid tasks are {possible_arguments:?}. Enter \"help\" for descriptions.")
         })?;
         run_task(state, task, &mut post_editor, &mut user_editor);
 

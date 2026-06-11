@@ -137,13 +137,17 @@ fn check_integrity_in_parallel(
     let file_checksum = match hash::compute_checksums(&content_path) {
         Ok((checksum, _)) => checksum,
         Err(err) => {
-            error!("Unable to read file for post {post_id} for reason: {err}");
+            error!("Unable to read content file {} for post {post_id}: {err}", content_path.display());
             return Ok(());
         }
     };
 
     if checksum != file_checksum {
-        warn!("Post {post_id} failed integrity check. The file may have been corrupted or silently modified.");
+        warn!(
+            "Post {post_id} failed integrity check (file: {}). \
+             The file may have been corrupted or silently modified.",
+            content_path.display()
+        );
         failures.increment();
     }
     progress.increment();
@@ -155,12 +159,23 @@ fn recompute_index_in_parallel(state: &AppState, post_id: i64, progress: &Progre
     admin::is_cancelled()?;
 
     let mut conn = state.connection_pool.get_blocking()?;
-    let signature: CompressedSignature = post_signature::table
+    let signature: CompressedSignature = match post_signature::table
         .find(post_id)
         .select(post_signature::signature)
         .for_no_key_update()
         .first(&mut conn)
-        .unwrap();
+        .optional()
+    {
+        Ok(Some(signature)) => signature,
+        Ok(None) => {
+            warn!("Post {post_id} has no signature; run recompute_signatures to create one. Skipping.");
+            return Ok(());
+        }
+        Err(err) => {
+            error!("Cannot retrieve signature for post {post_id}: {err}");
+            return Ok(());
+        }
+    };
 
     let indexes = signature::generate_indexes(&signature);
     match diesel::update(post_signature::table.find(post_id))
@@ -201,7 +216,7 @@ fn recompute_checksum_in_parallel(
     let (checksum, md5_checksum) = match hash::compute_checksums(&image_path) {
         Ok(checksums) => checksums,
         Err(err) => {
-            error!("Unable to compute checksum for post {post_id} for reason: {err}");
+            error!("Unable to compute checksum for post {post_id} from {}: {err}", image_path.display());
             return Ok(());
         }
     };
@@ -262,7 +277,10 @@ fn recompute_signature_in_parallel(state: &AppState, post_id: i64, progress: &Pr
     let image = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(image) => image,
         Err(err) => {
-            error!("Unable to get representative image for post {post_id} for reason: {err}");
+            error!(
+                "Unable to decode representative image for post {post_id} from {}: {err}",
+                content_path.display()
+            );
             return Ok(());
         }
     };
@@ -326,7 +344,7 @@ fn regenerate_thumbnail_in_parallel(state: &AppState, post_id: i64, progress: &P
     let thumbnail = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(image) => thumbnail::create(&state.config, &image, ThumbnailType::Post),
         Err(err) => {
-            error!("Cannot decode content for post {post_id} for reason: {err}");
+            error!("Cannot decode content for post {post_id} from {}: {err}", content_path.display());
             return Ok(());
         }
     };
@@ -425,7 +443,10 @@ fn convert_post_to_jxl_in_parallel(
     let decoded = match decode::image(&old_content_path, mime_type) {
         Ok(img) => img,
         Err(err) => {
-            error!("Post {post_id}: failed — cannot decode {mime_type} content: {err}");
+            error!(
+                "Post {post_id}: failed — cannot decode {mime_type} content at {}: {err}",
+                old_content_path.display()
+            );
             failed.increment();
             return Ok(());
         }
@@ -446,7 +467,11 @@ fn convert_post_to_jxl_in_parallel(
     if let Err(err) = filesystem::create_parent_directories(&new_content_path)
         .and_then(|_| std::fs::write(&new_content_path, &jxl_bytes).map_err(Into::into))
     {
-        error!("Post {post_id}: failed — cannot write JXL file: {err}");
+        error!(
+            "Post {post_id}: failed — cannot write JXL file to {}: {err}. \
+             Check free disk space and data directory permissions.",
+            new_content_path.display()
+        );
         failed.increment();
         return Ok(());
     }
@@ -568,11 +593,19 @@ fn compute_phash_in_parallel(
         // so a thumbnail-derived hash is nearly identical to one from the original.
         Err(err) => match decode_generated_thumbnail(state, post_id) {
             Ok(img) => {
-                warn!("Post {post_id}: content undecodable ({err}); computing pHash from generated thumbnail");
+                warn!(
+                    "Post {post_id}: content at {} undecodable ({err}); computing pHash from generated thumbnail",
+                    content_path.display()
+                );
                 img
             }
             Err(thumbnail_err) => {
-                error!("Cannot decode content for post {post_id}: {err} (thumbnail fallback failed: {thumbnail_err})");
+                error!(
+                    "Cannot compute pHash for post {post_id}: content at {} undecodable ({err}) \
+                     and thumbnail fallback failed ({thumbnail_err}). Post will be excluded from \
+                     similar: searches until its pHash is computed.",
+                    content_path.display()
+                );
                 return Ok(());
             }
         },

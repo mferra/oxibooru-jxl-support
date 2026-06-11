@@ -39,7 +39,7 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
@@ -64,7 +64,7 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
@@ -89,7 +89,7 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
@@ -144,7 +144,8 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
                 continue;
             };
 
-            let file_size = filesystem::file_size(path)?;
+            let file_size = filesystem::file_size(path)
+                .map_err(|err| format!("Cannot read size of {}: {err}", path.display()))?;
             diesel::update(user::table)
                 .set(user::custom_avatar_size.eq(file_size))
                 .filter(user::name.eq(username))
@@ -164,11 +165,12 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
-            let file_size = filesystem::file_size(path)?;
+            let file_size = filesystem::file_size(path)
+                .map_err(|err| format!("Cannot read size of {}: {err}", path.display()))?;
             diesel::update(post::table)
                 .set(post::generated_thumbnail_size.eq(file_size))
                 .filter(post::id.eq(post_id))
@@ -188,11 +190,12 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
-            let file_size = filesystem::file_size(path)?;
+            let file_size = filesystem::file_size(path)
+                .map_err(|err| format!("Cannot read size of {}: {err}", path.display()))?;
             diesel::update(post::table)
                 .set(post::custom_thumbnail_size.eq(file_size))
                 .filter(post::id.eq(post_id))
@@ -431,11 +434,12 @@ pub fn reset_statistics_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Could not find post_id of {path:?}");
+                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
                 continue;
             };
 
-            let file_size = filesystem::file_size(path)?;
+            let file_size = filesystem::file_size(path)
+                .map_err(|err| format!("Cannot read size of {}: {err}", path.display()))?;
             diesel::update(post::table)
                 .set(post::file_size.eq(file_size))
                 .filter(post::id.eq(post_id))
