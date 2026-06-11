@@ -50,10 +50,16 @@ post_height   = 300
 
 # On-upload transcoding pipeline.
 # When enabled, static images are stored as JXL and GIF animations as WebP or AV1.
+# These settings also control the convert_posts_to_jxl admin task.
 [transcoding]
 enabled = false
 # JXL encode quality for post content (0–100).
 image_quality = 90
+# Source image formats eligible for JXL conversion, by file extension.
+# Already-compressed modern formats (webp, avif) usually grow when re-encoded,
+# so they are excluded by default. Conversions that don't reduce file size are
+# discarded and the original is kept regardless of this list.
+image_formats = ["png", "jpg", "bmp"]
 # Target format for GIF animations: "smallest" (pick smaller of WebP/AV1),
 # "webp" (always WebP), or "av1" (AV1 with WebP fallback).
 animation_format = "smallest"

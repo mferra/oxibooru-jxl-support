@@ -172,11 +172,17 @@ fn maybe_transcode(
             tc.animation_format,
             ctx.av1_supported,
         )?),
-        // Any other static image → JXL at configured quality.
-        (PostType::Image, _) => Some((encode::to_jxl(image, tc.image_quality)?, MimeType::Jxl)),
-        // Video, Flash, and anything else: leave untouched.
+        // Static images in configured formats → JXL at configured quality.
+        (PostType::Image, _) if tc.converts_to_jxl(mime_type) => {
+            Some((encode::to_jxl(image, tc.image_quality)?, MimeType::Jxl))
+        }
+        // Video, Flash, excluded image formats, and anything else: leave untouched.
         _ => None,
     };
+
+    // Keep the original when transcoding wouldn't actually save space.
+    let original_size = content::map_read_result(filesystem::file_size(&temp_path))?;
+    let transcoded = transcoded.filter(|(bytes, _)| (bytes.len() as i64) < original_size);
 
     if let Some((bytes, new_mime)) = transcoded {
         // Write transcoded bytes to a new temp token so the file extension is correct.
@@ -203,8 +209,7 @@ fn maybe_transcode(
         Ok((new_token, new_mime, new_post_type, file_size, checksum, md5_checksum))
     } else {
         // No transcoding: compute checksums of the original file.
-        let file_size = content::map_read_result(filesystem::file_size(&temp_path))?;
         let (checksum, md5_checksum) = content::map_read_result(hash::compute_checksums(&temp_path))?;
-        Ok((token, mime_type, post_type, file_size, checksum, md5_checksum))
+        Ok((token, mime_type, post_type, original_size, checksum, md5_checksum))
     }
 }

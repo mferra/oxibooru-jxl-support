@@ -424,6 +424,14 @@ fn convert_post_to_jxl_in_parallel(
         return Ok(());
     }
 
+    // Skip formats not configured for conversion (already-compressed formats like
+    // WebP usually grow when re-encoded as JXL).
+    if !state.config.transcoding.converts_to_jxl(mime_type) {
+        info!("Post {post_id}: skipped — {mime_type} is not listed in transcoding.image_formats");
+        skipped.increment();
+        return Ok(());
+    }
+
     let post_hash = PostHash::new(&state.config, post_id);
     let old_content_path = post_hash.content_path(mime_type);
 
@@ -462,6 +470,16 @@ fn convert_post_to_jxl_in_parallel(
         }
     };
 
+    // Keep the original when conversion doesn't actually save space.
+    if orig_size > 0 && jxl_bytes.len() as u64 >= orig_size {
+        info!(
+            "Post {post_id}: skipped — JXL would be {} B, original {mime_type} is {orig_size} B; keeping original",
+            jxl_bytes.len()
+        );
+        skipped.increment();
+        return Ok(());
+    }
+
     // Write new JXL content file.
     let new_content_path = post_hash.content_path(MimeType::Jxl);
     if let Err(err) = filesystem::create_parent_directories(&new_content_path)
@@ -487,6 +505,35 @@ fn convert_post_to_jxl_in_parallel(
         }
     };
 
+    // Pixel-identical duplicates stored in different formats encode to the same JXL
+    // bytes, which would violate the unique checksum constraint. Detect this up front
+    // and report the duplicate pair instead of failing on the database update.
+    match post::table
+        .select(post::id)
+        .filter(post::checksum.eq(new_checksum.as_ref()))
+        .filter(post::id.ne(post_id))
+        .first::<i64>(&mut conn)
+        .optional()
+    {
+        Ok(Some(duplicate_id)) => {
+            warn!(
+                "Post {post_id}: skipped — converting would produce content identical to post \
+                 {duplicate_id} (pixel-perfect duplicate in a different format). Keeping the \
+                 original file; consider merging these posts."
+            );
+            let _ = std::fs::remove_file(&new_content_path);
+            skipped.increment();
+            return Ok(());
+        }
+        Ok(None) => (),
+        Err(err) => {
+            error!("Post {post_id}: failed — duplicate check error: {err}");
+            let _ = std::fs::remove_file(&new_content_path);
+            failed.increment();
+            return Ok(());
+        }
+    }
+
     // Generate thumbnail.
     let thumb = thumbnail::create(&state.config, &decoded, ThumbnailType::Post);
 
@@ -508,9 +555,21 @@ fn convert_post_to_jxl_in_parallel(
     });
 
     if let Err(err) = db_result {
-        error!("Post {post_id}: failed — database update error: {err}");
+        // The up-front duplicate check can race with another worker converting the
+        // other half of a duplicate pair, so a unique violation here still means
+        // "pixel-perfect duplicate", not a real failure.
+        if let diesel::result::Error::DatabaseError(diesel::result::DatabaseErrorKind::UniqueViolation, _) = err {
+            warn!(
+                "Post {post_id}: skipped — converted JXL is byte-identical to another post's \
+                 content (pixel-perfect duplicate). Keeping the original file; consider \
+                 merging these posts."
+            );
+            skipped.increment();
+        } else {
+            error!("Post {post_id}: failed — database update error: {err}");
+            failed.increment();
+        }
         let _ = std::fs::remove_file(&new_content_path);
-        failed.increment();
         return Ok(());
     }
 

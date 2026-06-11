@@ -1,5 +1,5 @@
 use crate::filesystem::Directory;
-use crate::model::enums::UserRank;
+use crate::model::enums::{MimeType, UserRank};
 use crate::string::SmallString;
 use config::builder::DefaultState;
 use config::{ConfigBuilder, File, FileFormat};
@@ -95,6 +95,11 @@ pub struct TranscodingConfig {
     /// JXL quality for post content (0–100). Applied to all static image uploads.
     #[serde(default = "TranscodingConfig::default_image_quality")]
     pub image_quality: f32,
+    /// Source image formats eligible for JXL conversion, given as file extensions
+    /// (e.g. "png", "jpg"). Already-compressed modern formats like WebP and AVIF
+    /// usually grow when re-encoded as JXL, so they are excluded by default.
+    #[serde(default = "TranscodingConfig::default_image_formats")]
+    pub image_formats: Vec<SmallString>,
     /// Target format for GIF animation transcoding.
     #[serde(default)]
     pub animation_format: AnimationFormat,
@@ -104,6 +109,17 @@ impl TranscodingConfig {
     fn default_image_quality() -> f32 {
         90.0
     }
+
+    fn default_image_formats() -> Vec<SmallString> {
+        ["png", "jpg", "bmp"].into_iter().map(SmallString::new).collect()
+    }
+
+    /// Returns true when static images of `mime_type` should be converted to JXL.
+    pub fn converts_to_jxl(&self, mime_type: MimeType) -> bool {
+        self.image_formats
+            .iter()
+            .any(|extension| MimeType::from_extension(extension).is_ok_and(|mime| mime == mime_type))
+    }
 }
 
 impl Default for TranscodingConfig {
@@ -111,6 +127,7 @@ impl Default for TranscodingConfig {
         Self {
             enabled: false,
             image_quality: Self::default_image_quality(),
+            image_formats: Self::default_image_formats(),
             animation_format: AnimationFormat::default(),
         }
     }
