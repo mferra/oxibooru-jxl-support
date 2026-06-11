@@ -13,13 +13,13 @@ use crate::extract::Ctx;
 use crate::filesystem;
 use crate::model::enums::{MimeType, PostType};
 use crate::model::post::{CompressedSignature, NewPostSignature};
-use crate::schema::{database_statistics, post, post_signature};
+use crate::schema::{database_statistics, post, post_relation, post_signature};
 use crate::search::Builder;
 use crate::search::post::{QueryBuilder, Token};
 use crate::time::{DateTime, Timer};
 use crate::{admin, update};
 use diesel::dsl::exists;
-use diesel::{Connection, ExpressionMethods, Insertable, OptionalExtension, QueryDsl, RunQueryDsl};
+use diesel::{Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl};
 use image::DynamicImage;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::{error, info, warn};
@@ -521,6 +521,7 @@ fn convert_post_to_jxl_in_parallel(
                  {duplicate_id} (pixel-perfect duplicate in a different format). Keeping the \
                  original file; consider merging these posts."
             );
+            relate_duplicate_posts(&mut conn, post_id, duplicate_id);
             let _ = std::fs::remove_file(&new_content_path);
             skipped.increment();
             return Ok(());
@@ -564,6 +565,20 @@ fn convert_post_to_jxl_in_parallel(
                  content (pixel-perfect duplicate). Keeping the original file; consider \
                  merging these posts."
             );
+            // Identify the post that owns the conflicting checksum to record the pair.
+            match post::table
+                .select(post::id)
+                .filter(post::checksum.eq(new_checksum.as_ref()))
+                .filter(post::id.ne(post_id))
+                .first::<i64>(&mut conn)
+                .optional()
+            {
+                Ok(Some(duplicate_id)) => relate_duplicate_posts(&mut conn, post_id, duplicate_id),
+                Ok(None) => (),
+                Err(query_err) => {
+                    warn!("Post {post_id}: could not identify the duplicate post: {query_err}");
+                }
+            }
             skipped.increment();
         } else {
             error!("Post {post_id}: failed — database update error: {err}");
@@ -680,6 +695,34 @@ fn compute_phash_in_parallel(
         Err(err) => error!("pHash update failed for post {post_id}: {err}"),
     }
     Ok(())
+}
+
+/// Records a bidirectional relation between two posts discovered to be pixel-perfect
+/// duplicates, so the pair remains visible in the UI for later review or merging.
+/// Does nothing if the posts are already related.
+fn relate_duplicate_posts(conn: &mut PgConnection, post_id: i64, duplicate_id: i64) {
+    let already_related: bool = match diesel::select(exists(
+        post_relation::table
+            .filter(post_relation::parent_id.eq(post_id))
+            .filter(post_relation::child_id.eq(duplicate_id)),
+    ))
+    .first(conn)
+    {
+        Ok(related) => related,
+        Err(err) => {
+            warn!("Post {post_id}: could not check for existing relation with duplicate post {duplicate_id}: {err}");
+            return;
+        }
+    };
+    if already_related {
+        return;
+    }
+
+    match update::post::add_relations(conn, post_id, &[duplicate_id]) {
+        Ok(()) => info!("Post {post_id}: created relation with duplicate post {duplicate_id}"),
+        // A parallel worker converting the other half of the pair may have just inserted it.
+        Err(err) => warn!("Post {post_id}: could not create relation with duplicate post {duplicate_id}: {err}"),
+    }
 }
 
 /// Decodes a post's generated thumbnail. Thumbnails on disk may predate a thumbnail
