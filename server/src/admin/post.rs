@@ -12,16 +12,21 @@ use crate::content::{decode, hash, signature, thumbnail};
 use crate::extract::Ctx;
 use crate::filesystem;
 use crate::model::enums::{MimeType, PostType};
-use crate::model::post::{CompressedSignature, NewPostSignature};
+use crate::model::post::{CompressedSignature, NewPostSignature, Post};
 use crate::schema::{database_statistics, post, post_relation, post_signature};
 use crate::search::Builder;
 use crate::search::post::{QueryBuilder, Token};
 use crate::time::{DateTime, Timer};
-use crate::{admin, update};
+use crate::{admin, snapshot, update};
 use diesel::dsl::exists;
-use diesel::{Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl};
-use image::DynamicImage;
+use diesel::{
+    Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl,
+    SelectableHelper,
+};
+use image::{DynamicImage, GenericImageView};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 /// Checks the integrity of all posts on the filesystem by comparing the stored
@@ -722,6 +727,169 @@ fn relate_duplicate_posts(conn: &mut PgConnection, post_id: i64, duplicate_id: i
         Ok(()) => info!("Post {post_id}: created relation with duplicate post {duplicate_id}"),
         // A parallel worker converting the other half of the pair may have just inserted it.
         Err(err) => warn!("Post {post_id}: could not create relation with duplicate post {duplicate_id}: {err}"),
+    }
+}
+
+/// Merges pairs of related posts whose content is pixel-identical.
+///
+/// Candidate pairs come from existing post relations (such as those created by the
+/// convert_posts_to_jxl task when it detects duplicates). The relation alone is not
+/// proof — users can create relations manually — so each pair is verified by decoding
+/// both files and comparing pixels exactly; related posts that are not true duplicates
+/// are left untouched.
+///
+/// Merge policy: the post with the lower ID survives, and the smaller content file is
+/// kept (JXL preferred on size ties). Tags, pools, scores, favorites, features,
+/// comments, descriptions, and relations are merged into the surviving post via the
+/// same logic as the post merge API, including a merge snapshot for auditing.
+pub fn merge_duplicate_posts(state: &AppState, editor: &mut PostEditor) {
+    input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
+        let post_ids = user_query(state, editor)?;
+        let selected: HashSet<i64> = post_ids.into_iter().collect();
+
+        let _timer = Timer::new("merge_duplicate_posts");
+        let merged = ProgressReporter::new("Duplicate pairs merged", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new("Related pairs skipped (not pixel-identical duplicates)", None);
+        let failed = ProgressReporter::new("Merges failed", None);
+
+        // Relations are stored bidirectionally; parent_id < child_id picks each pair once.
+        let pairs: Vec<(i64, i64)> = post_relation::table
+            .select((post_relation::parent_id, post_relation::child_id))
+            .filter(post_relation::parent_id.lt(post_relation::child_id))
+            .load(&mut state.connection_pool.get_blocking()?)?;
+        info!("Examining {} related post pairs", pairs.len());
+
+        // Merges mutate many shared tables and can cascade into other pairs,
+        // so pairs are processed sequentially.
+        for (merge_to_id, absorbed_id) in pairs {
+            admin::is_cancelled()?;
+            if !selected.contains(&merge_to_id) || !selected.contains(&absorbed_id) {
+                continue;
+            }
+            merge_pair_if_duplicate(state, merge_to_id, absorbed_id, &merged, &skipped, &failed);
+        }
+
+        merged.report();
+        skipped.report();
+        failed.report();
+        if !state.config.delete_source_files {
+            info!(
+                "delete_source_files is disabled, so absorbed posts' files were left on disk. \
+                 Enable it in config.toml for merges to free disk space."
+            );
+        }
+        Ok(())
+    });
+}
+
+/// Verifies that a candidate pair is pixel-identical and merges `absorbed_id` into
+/// `merge_to_id` if so. `merge_to_id` must be the lower ID of the pair.
+fn merge_pair_if_duplicate(
+    state: &AppState,
+    merge_to_id: i64,
+    absorbed_id: i64,
+    merged: &ProgressReporter,
+    skipped: &ProgressReporter,
+    failed: &ProgressReporter,
+) {
+    let mut conn = match state.connection_pool.get_blocking() {
+        Ok(conn) => conn,
+        Err(err) => {
+            error!("Cannot merge posts {merge_to_id} and {absorbed_id}: could not get a database connection: {err}");
+            failed.increment();
+            return;
+        }
+    };
+
+    let load_result = post::table
+        .find(merge_to_id)
+        .select(Post::as_select())
+        .first(&mut conn)
+        .optional()
+        .and_then(|merge_to| {
+            post::table
+                .find(absorbed_id)
+                .select(Post::as_select())
+                .first(&mut conn)
+                .optional()
+                .map(|absorbed| merge_to.zip(absorbed))
+        });
+    let (merge_to, absorbed) = match load_result {
+        Ok(Some(posts)) => posts,
+        // One of the posts no longer exists, e.g. it was absorbed by an earlier merge.
+        Ok(None) => {
+            info!("Posts {merge_to_id} and {absorbed_id}: skipped — one of them no longer exists");
+            return;
+        }
+        Err(err) => {
+            error!("Cannot retrieve posts {merge_to_id} and {absorbed_id}: {err}");
+            failed.increment();
+            return;
+        }
+    };
+
+    // Pixel comparison of a single frame only proves identity for still images.
+    if merge_to.type_ != PostType::Image || absorbed.type_ != PostType::Image {
+        info!("Posts {merge_to_id} and {absorbed_id}: skipped — related pair is not a pair of still images");
+        skipped.increment();
+        return;
+    }
+
+    let merge_to_path = PostHash::new(&state.config, merge_to_id).content_path(merge_to.mime_type);
+    let absorbed_path = PostHash::new(&state.config, absorbed_id).content_path(absorbed.mime_type);
+    let merge_to_image = match decode::image(&merge_to_path, merge_to.mime_type) {
+        Ok(image) => image,
+        Err(err) => {
+            error!("Cannot decode content for post {merge_to_id} from {}: {err}", merge_to_path.display());
+            failed.increment();
+            return;
+        }
+    };
+    let absorbed_image = match decode::image(&absorbed_path, absorbed.mime_type) {
+        Ok(image) => image,
+        Err(err) => {
+            error!("Cannot decode content for post {absorbed_id} from {}: {err}", absorbed_path.display());
+            failed.increment();
+            return;
+        }
+    };
+
+    if merge_to_image.dimensions() != absorbed_image.dimensions()
+        || merge_to_image.to_rgba8().as_raw() != absorbed_image.to_rgba8().as_raw()
+    {
+        info!("Posts {merge_to_id} and {absorbed_id}: skipped — contents are not pixel-identical");
+        skipped.increment();
+        return;
+    }
+
+    // Keep the smaller content file; prefer JXL on size ties.
+    let keep_absorbed_content = match absorbed.file_size.cmp(&merge_to.file_size) {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => absorbed.mime_type == MimeType::Jxl && merge_to.mime_type != MimeType::Jxl,
+    };
+
+    let merge_result: ApiResult<()> = conn.transaction(|conn| {
+        update::post::merge(conn, &state.config, &absorbed, &merge_to, keep_absorbed_content)?;
+        snapshot::post::merge_snapshot(conn, admin::client(), absorbed_id, merge_to_id)?;
+        Ok(())
+    });
+    match merge_result {
+        Ok(()) => {
+            let (kept_mime, kept_size) = if keep_absorbed_content {
+                (absorbed.mime_type, absorbed.file_size)
+            } else {
+                (merge_to.mime_type, merge_to.file_size)
+            };
+            info!(
+                "Merged post {absorbed_id} into post {merge_to_id} (kept {kept_mime} content, {kept_size} B)"
+            );
+            merged.increment();
+        }
+        Err(err) => {
+            error!("Failed to merge post {absorbed_id} into post {merge_to_id}: {err}");
+            failed.increment();
+        }
     }
 }
 

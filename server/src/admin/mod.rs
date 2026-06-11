@@ -98,6 +98,8 @@ pub enum AdminTask {
     ConvertPostsToJxl,
     #[strum(message = "Compute perceptual hash (pHash) for posts that don't have one")]
     CalculatePhash,
+    #[strum(message = "Merge related posts whose content is pixel-identical (smaller file wins)")]
+    MergeDuplicatePosts,
 }
 
 /// Checks if server was started in admin mode.
@@ -210,6 +212,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::ResetThumbnailSizes => database::reset_thumbnail_sizes(state),
         AdminTask::ConvertPostsToJxl => post::convert_posts_to_jxl(state, post_editor),
         AdminTask::CalculatePhash => post::compute_phash(state, post_editor),
+        AdminTask::MergeDuplicatePosts => post::merge_duplicate_posts(state, post_editor),
     }
 }
 
