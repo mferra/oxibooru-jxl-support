@@ -1,6 +1,8 @@
 use crate::admin::input::PostEditor;
 use crate::admin::{AdminResult, PRINT_INTERVAL, ProgressReporter, input};
+use crate::api::error::ApiResult;
 use crate::app::AppState;
+use crate::config::ThumbnailFormat;
 use crate::content::encode;
 use crate::content::hash::{Checksum, PostHash};
 use crate::content::signature::SIGNATURE_VERSION;
@@ -18,6 +20,7 @@ use crate::time::{DateTime, Timer};
 use crate::{admin, update};
 use diesel::dsl::exists;
 use diesel::{Connection, ExpressionMethods, Insertable, OptionalExtension, QueryDsl, RunQueryDsl};
+use image::DynamicImage;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::{error, info, warn};
 
@@ -371,13 +374,13 @@ fn convert_post_to_jxl_in_parallel(
     admin::is_cancelled()?;
 
     let mut conn = state.connection_pool.get_blocking()?;
-    let mime_type = match post::table
+    let (mime_type, existing_phash): (MimeType, Option<i64>) = match post::table
         .find(post_id)
-        .select(post::mime_type)
+        .select((post::mime_type, post::phash))
         .first(&mut conn)
         .optional()
     {
-        Ok(Some(m)) => m,
+        Ok(Some(row)) => row,
         Ok(None) => {
             info!("Post {post_id}: skipped — not found (deleted between query and processing)");
             return Ok(());
@@ -462,6 +465,10 @@ fn convert_post_to_jxl_in_parallel(
     // Generate thumbnail.
     let thumb = thumbnail::create(&state.config, &decoded, ThumbnailType::Post);
 
+    // Compute the pHash from the already-decoded image when missing, so the pHash
+    // backfill task doesn't have to decode this file a second time.
+    let phash_value = existing_phash.unwrap_or_else(|| hash::compute_phash(&decoded));
+
     // Persist everything atomically-ish: update DB then swap files.
     let db_result = conn.transaction(|conn| {
         diesel::update(post::table.find(post_id))
@@ -470,6 +477,7 @@ fn convert_post_to_jxl_in_parallel(
                 post::checksum.eq(new_checksum.as_ref()),
                 post::checksum_md5.eq(new_md5.as_ref()),
                 post::file_size.eq(jxl_bytes.len() as i64),
+                post::phash.eq(phash_value),
             ))
             .execute(conn)
     });
@@ -552,13 +560,22 @@ fn compute_phash_in_parallel(
         return Ok(());
     }
 
-    let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let post_hash = PostHash::new(&state.config, post_id);
+    let content_path = post_hash.content_path(mime_type);
     let image = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(img) => img,
-        Err(err) => {
-            error!("Cannot decode content for post {post_id}: {err}");
-            return Ok(());
-        }
+        // Fall back to the generated thumbnail. compute_phash downscales to 32x32 anyway,
+        // so a thumbnail-derived hash is nearly identical to one from the original.
+        Err(err) => match decode_generated_thumbnail(state, post_id) {
+            Ok(img) => {
+                warn!("Post {post_id}: content undecodable ({err}); computing pHash from generated thumbnail");
+                img
+            }
+            Err(thumbnail_err) => {
+                error!("Cannot decode content for post {post_id}: {err} (thumbnail fallback failed: {thumbnail_err})");
+                return Ok(());
+            }
+        },
     };
 
     let phash_value = hash::compute_phash(&image);
@@ -571,6 +588,19 @@ fn compute_phash_in_parallel(
         Err(err) => error!("pHash update failed for post {post_id}: {err}"),
     }
     Ok(())
+}
+
+/// Decodes a post's generated thumbnail. Thumbnails on disk may predate a thumbnail
+/// format config change, so the configured format is tried first and then the other
+/// known format.
+fn decode_generated_thumbnail(state: &AppState, post_id: i64) -> ApiResult<DynamicImage> {
+    let post_hash = PostHash::new(&state.config, post_id);
+    let (first, second) = match state.config.thumbnails.format {
+        ThumbnailFormat::Jpeg => (("jpg", MimeType::Jpeg), ("jxl", MimeType::Jxl)),
+        ThumbnailFormat::Jxl => (("jxl", MimeType::Jxl), ("jpg", MimeType::Jpeg)),
+    };
+    decode::image(&post_hash.generated_thumbnail_path_with_ext(first.0), first.1)
+        .or_else(|_| decode::image(&post_hash.generated_thumbnail_path_with_ext(second.0), second.1))
 }
 
 fn user_query(state: &AppState, editor: &mut PostEditor) -> AdminResult<Vec<i64>> {
