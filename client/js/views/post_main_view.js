@@ -23,6 +23,12 @@ class PostMainView {
         const sourceNode = template(ctx);
         const postContainerNode = sourceNode.querySelector(".post-container");
         const sidebarNode = sourceNode.querySelector(".sidebar");
+        const relatedStripNode = sourceNode.querySelector(
+            ".related-posts-strip"
+        );
+        if (relatedStripNode) {
+            this._installRelatedPostsStrip(relatedStripNode);
+        }
         views.replaceContent(this._hostNode, sourceNode);
         views.syncScrollPosition();
 
@@ -116,6 +122,25 @@ class PostMainView {
                 }
             }
         );
+    }
+
+    _installRelatedPostsStrip(stripNode) {
+        const toggleNode = stripNode.querySelector(".strip-toggle");
+        const refresh = () => {
+            const collapsed =
+                localStorage.getItem("relatedPostsStripCollapsed") === "1";
+            stripNode.classList.toggle("collapsed", collapsed);
+            toggleNode.textContent = collapsed ? "» show" : "« hide";
+        };
+        toggleNode.addEventListener("click", (e) => {
+            e.preventDefault();
+            localStorage.setItem(
+                "relatedPostsStripCollapsed",
+                stripNode.classList.contains("collapsed") ? "0" : "1"
+            );
+            refresh();
+        });
+        refresh();
     }
 
     _installSidebar(ctx) {

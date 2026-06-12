@@ -72,6 +72,9 @@ Promise.resolve()
             controllers.push(
                 require("./controllers/post_detail_controller.js")
             );
+            controllers.push(
+                require("./controllers/post_related_controller.js")
+            );
             controllers.push(require("./controllers/post_main_controller.js"));
             controllers.push(require("./controllers/post_list_controller.js"));
             controllers.push(

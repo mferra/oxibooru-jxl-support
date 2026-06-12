@@ -50,6 +50,24 @@
     </aside>
 
     <div class='content'>
+        <% if (ctx.post.relations.length) { %>
+            <nav class='related-posts-strip'>
+                <header>
+                    <span>This post has <a href='<%= ctx.formatClientLink("post", ctx.post.id, "related") %>'><%- ctx.post.relations.length %> related post<%- ctx.post.relations.length === 1 ? "" : "s" %></a></span>
+                    <a class='strip-toggle' href='#'></a>
+                </header>
+                <ul><!--
+                    --><% for (let post of ctx.post.relations) { %><!--
+                        --><li><!--
+                            --><a href='<%= ctx.getPostUrl(post.id, ctx.parameters) %>'><!--
+                                --><%= ctx.makeThumbnail(post.thumbnailUrl) %><!--
+                            --></a><!--
+                        --></li><!--
+                    --><% } %><!--
+                --></ul>
+            </nav>
+        <% } %>
+
         <div class='post-container'></div>
 
         <% if (ctx.editMode && ctx.canEditPostDescription) { %>

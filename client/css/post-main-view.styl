@@ -40,6 +40,38 @@
     >.content
         width: 100%
 
+    .related-posts-strip
+        margin-bottom: 0.6em
+        padding: 0.4em 0.6em
+        background: $top-navigation-color
+
+        header
+            display: flex
+            justify-content: space-between
+
+            .strip-toggle
+                margin-left: 1em
+                white-space: nowrap
+
+        ul
+            list-style-type: none
+            margin: 0.4em 0 0 0
+            padding: 0
+            white-space: nowrap
+            overflow-x: auto
+
+            li
+                display: inline-block
+                margin: 0 0.3em 0 0
+
+            .thumbnail
+                width: 8em
+                height: 6em
+                background-position: 50% 30%
+
+        &.collapsed ul
+            display: none
+
     .post-container
         margin-bottom: 0.6em
 
@@ -68,6 +100,9 @@
                     box-shadow: inset 0 0 0 0.3em $main-color
 
     .description-container
+        background: $top-navigation-color-darktheme
+
+    .related-posts-strip
         background: $top-navigation-color-darktheme
 
 @media (max-width: 800px)
