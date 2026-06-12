@@ -61,6 +61,30 @@ where
     Ok(upload_token)
 }
 
+/// Saves a streamed archive (e.g. a CBZ) to the temporary uploads folder and
+/// returns its path. Archives never become post content, so they are stored
+/// with a generic `.zip` extension rather than an [`UploadToken`].
+///
+/// Like [`save_uploaded_file`], cleanup of failed or abandoned files is left
+/// to the temporary uploads cleanup task.
+pub async fn save_uploaded_archive<S, E>(config: &Config, mut stream: S) -> ApiResult<PathBuf>
+where
+    S: StreamExt<Item = Result<Bytes, E>> + Unpin,
+    ApiError: From<E>,
+{
+    let file_name = format!("{}.zip", uuid::Uuid::new_v4());
+    let archive_path = config.path(Directory::TemporaryUploads).join(file_name);
+    create_parent_directories(&archive_path)?;
+
+    let mut file = File::create(&archive_path).await?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+    }
+
+    Ok(archive_path)
+}
+
 /// Saves custom avatar `thumbnail` for user with name `username` to disk.
 /// Returns size of the thumbnail in bytes.
 pub fn save_custom_avatar(config: &Config, username: &str, thumbnail: &DynamicImage) -> ImageResult<i64> {

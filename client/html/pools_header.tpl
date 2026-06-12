@@ -14,6 +14,10 @@
                 <a class='append' href='<%- ctx.formatClientLink('pool', 'create') %>'>Add new pool</a>
             <% } %>
 
+            <% if (ctx.canImport) { %>
+                <a class='append' href='<%- ctx.formatClientLink('pool', 'import') %>'>Import CBZ</a>
+            <% } %>
+
             <% if (ctx.canEditPoolCategories) { %>
                 <a class='append' href='<%- ctx.formatClientLink('pool-categories') %>'>Pool categories</a>
             <% } %>

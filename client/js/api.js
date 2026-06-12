@@ -63,6 +63,15 @@ class Api extends events.EventTarget {
         return this._wrappedRequest(url, request.post, data, files, options);
     }
 
+    // Sends files as multipart parts of the request itself (with `data` as a
+    // JSON metadata part), instead of routing them through the temporary
+    // uploads API like post() does. Needed for files that aren't post
+    // content, such as comic archives.
+    postDirect(url, data, files, options) {
+        this.cache = {};
+        return this._rawRequest(url, request.post, data, files, options);
+    }
+
     put(url, data, files, options) {
         this.cache = {};
         return this._wrappedRequest(url, request.put, data, files, options);

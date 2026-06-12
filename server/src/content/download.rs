@@ -3,11 +3,13 @@ use crate::config::Config;
 use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
 use crate::filesystem;
 use crate::model::enums::MimeType;
-use futures::StreamExt;
+use axum::body::Bytes;
+use futures::{Stream, StreamExt};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION, REFERER};
 use reqwest::redirect::Policy;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Response, StatusCode};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
@@ -72,9 +74,9 @@ fn is_shared_address_space(ip: Ipv4Addr) -> bool {
 /// Pinning to one validated address (via [`Client::resolve`] in the caller) prevents
 /// DNS-rebinding attacks, where the host would resolve to a safe address during
 /// validation but to an internal address at connection time.
-async fn resolve_validated_addr(host: &str, port: u16) -> ApiResult<SocketAddr> {
+async fn resolve_validated_addr(host: &str, port: u16, allow_private: bool) -> ApiResult<SocketAddr> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-    if addrs.iter().any(|addr| is_blocked_ip(addr.ip())) {
+    if !allow_private && addrs.iter().any(|addr| is_blocked_ip(addr.ip())) {
         return Err(forbidden_url("URL resolves to a disallowed address"));
     }
     addrs.into_iter().next().ok_or_else(|| forbidden_url("Could not resolve host"))
@@ -86,21 +88,21 @@ async fn resolve_validated_addr(host: &str, port: u16) -> ApiResult<SocketAddr> 
 /// IP-literal hosts (e.g. `http://[::1]/`) are validated directly, since
 /// [`tokio::net::lookup_host`] doesn't accept the bracketed form `url::Url::host_str`
 /// returns for IPv6 literals and a literal address doesn't need DNS resolution anyway.
-async fn resolve_target(url: &Url) -> ApiResult<(String, SocketAddr)> {
+async fn resolve_target(url: &Url, allow_private: bool) -> ApiResult<(String, SocketAddr)> {
     let port = url.port_or_known_default().ok_or_else(|| forbidden_url("URL has no port"))?;
     match url.host() {
         Some(url::Host::Domain(domain)) => {
-            let addr = resolve_validated_addr(domain, port).await?;
+            let addr = resolve_validated_addr(domain, port, allow_private).await?;
             Ok((domain.to_owned(), addr))
         }
         Some(url::Host::Ipv4(ip)) => {
-            if is_blocked_ip(IpAddr::V4(ip)) {
+            if !allow_private && is_blocked_ip(IpAddr::V4(ip)) {
                 return Err(forbidden_url("URL points to a disallowed address"));
             }
             Ok((ip.to_string(), SocketAddr::new(IpAddr::V4(ip), port)))
         }
         Some(url::Host::Ipv6(ip)) => {
-            if is_blocked_ip(IpAddr::V6(ip)) {
+            if !allow_private && is_blocked_ip(IpAddr::V6(ip)) {
                 return Err(forbidden_url("URL points to a disallowed address"));
             }
             Ok((ip.to_string(), SocketAddr::new(IpAddr::V6(ip), port)))
@@ -123,10 +125,9 @@ fn build_client(host: &str, addr: SocketAddr, headers: HeaderMap) -> ApiResult<C
         .map_err(ApiError::from)
 }
 
-/// Attempts to download file at the specified `url`.
-/// If successful, the file is saved in the temporary uploads directory
-/// and a content token is returned.
-pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
+/// Fetches `url`, following redirects manually so each target can be validated.
+/// `allow_private` permits targets in private address ranges (e.g. a LAN file server).
+async fn fetch_response(mut url: Url, allow_private: bool) -> ApiResult<Response> {
     let mut add_referer = false;
     let mut response = None;
     for _ in 0..MAX_ATTEMPTS {
@@ -134,7 +135,7 @@ pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
             return Err(forbidden_url("Only http and https URLs are allowed"));
         }
 
-        let (host, addr) = resolve_target(&url).await?;
+        let (host, addr) = resolve_target(&url, allow_private).await?;
 
         let mut headers = HeaderMap::new();
         if add_referer {
@@ -164,11 +165,31 @@ pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
         response = Some(candidate.error_for_status()?);
         break;
     }
-    let response = response.ok_or_else(|| forbidden_url("Too many redirects"))?;
+    response.ok_or_else(|| forbidden_url("Too many redirects"))
+}
 
+/// Enforces [`MAX_DOWNLOAD_SIZE`] on `response` and returns its limited byte stream.
+fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<Bytes>> + Unpin> {
     if response.content_length().is_some_and(|len| len > MAX_DOWNLOAD_SIZE) {
         return Err(forbidden_url("Content exceeds maximum allowed download size"));
     }
+
+    let mut downloaded: u64 = 0;
+    Ok(response.bytes_stream().map(move |chunk_result| {
+        let chunk = chunk_result?;
+        downloaded += chunk.len() as u64;
+        if downloaded > MAX_DOWNLOAD_SIZE {
+            return Err(forbidden_url("Content exceeds maximum allowed download size"));
+        }
+        Ok(chunk)
+    }))
+}
+
+/// Attempts to download file at the specified `url`.
+/// If successful, the file is saved in the temporary uploads directory
+/// and a content token is returned.
+pub async fn from_url(config: &Config, url: Url) -> ApiResult<UploadToken> {
+    let response = fetch_response(url, false).await?;
 
     let content_type = response
         .headers()
@@ -177,17 +198,18 @@ pub async fn from_url(config: &Config, mut url: Url) -> ApiResult<UploadToken> {
         .transpose()?;
     let mime_type = MimeType::from_str(content_type.unwrap_or("")).map_err(Box::from)?;
 
-    let mut downloaded: u64 = 0;
-    let limited_stream = response.bytes_stream().map(move |chunk_result| {
-        let chunk = chunk_result?;
-        downloaded += chunk.len() as u64;
-        if downloaded > MAX_DOWNLOAD_SIZE {
-            return Err(forbidden_url("Content exceeds maximum allowed download size"));
-        }
-        Ok(chunk)
-    });
+    let stream = limited_stream(response)?;
+    filesystem::save_uploaded_file(config, stream, mime_type).await
+}
 
-    filesystem::save_uploaded_file(config, limited_stream, mime_type).await
+/// Downloads an archive (e.g. a CBZ) from `url` into the temporary uploads
+/// directory and returns its path. Unlike [`from_url`], the Content-Type is
+/// not validated, since archives never become post content. Private (LAN)
+/// targets are permitted when `allow_lan_archive_downloads` is enabled.
+pub async fn archive_from_url(config: &Config, url: Url) -> ApiResult<PathBuf> {
+    let response = fetch_response(url, config.allow_lan_archive_downloads).await?;
+    let stream = limited_stream(response)?;
+    filesystem::save_uploaded_archive(config, stream).await
 }
 
 #[cfg(test)]

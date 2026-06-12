@@ -360,6 +360,11 @@ pub struct Config {
     pub delete_source_files: bool,
     pub append_tag_implications_on_post_edit: bool,
     pub post_similarity_threshold: f64,
+    /// Allows archive imports (CBZ) to download from private/LAN addresses.
+    /// Leave disabled unless you trust everyone with import privileges, as it
+    /// permits server-side requests against internal services.
+    #[serde(default)]
+    pub allow_lan_archive_downloads: bool,
     #[serde(with = "serde_regex")]
     pub pool_name_regex: Regex,
     #[serde(with = "serde_regex")]

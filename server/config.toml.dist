@@ -27,6 +27,10 @@ append_tag_implications_on_post_edit = false
 # Must be a number between 0 and 1
 post_similarity_threshold = 0.55
 
+# Allows archive imports (CBZ) to download from private/LAN addresses.
+# Leave disabled unless you trust everyone with import privileges (SSRF risk).
+allow_lan_archive_downloads = false
+
 pool_name_regex     = "^\\S+$"
 pool_category_regex = "^[^\\s%+#/]+$"
 

@@ -89,6 +89,9 @@ Promise.resolve()
                 require("./controllers/pool_create_controller.js")
             );
             controllers.push(
+                require("./controllers/pool_import_controller.js")
+            );
+            controllers.push(
                 require("./controllers/pool_reader_controller.js")
             );
             controllers.push(require("./controllers/pool_controller.js"));

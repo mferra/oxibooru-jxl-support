@@ -3,8 +3,10 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::api::{DeleteBody, MergeBody, PageParams, PagedResponse, ResourceParams};
 use crate::app::AppState;
 use crate::config::Action;
-use crate::extract::{Ctx, Json, Path, Query};
-use crate::model::enums::ResourceType;
+use crate::content::download;
+use crate::content::upload::MAX_UPLOAD_SIZE;
+use crate::extract::{Ctx, Json, JsonOrMultipart, Path, Query};
+use crate::model::enums::{PostSafety, ResourceType};
 use crate::model::pool::{NewPool, Pool};
 use crate::resource::pool::PoolInfo;
 use crate::schema::{pool, pool_category};
@@ -13,11 +15,13 @@ use crate::search::pool::QueryBuilder;
 use crate::snapshot::pool::SnapshotData;
 use crate::string::{LargeString, SmallString};
 use crate::time::DateTime;
-use crate::{api, resource, snapshot, update};
+use crate::{api, comic, filesystem, resource, snapshot, update};
+use axum::extract::DefaultBodyLimit;
 use diesel::dsl::exists;
 use diesel::{ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl, SaveChangesDsl};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use url::Url;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -28,6 +32,11 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(create))
         .routes(routes!(get, update, delete))
         .routes(routes!(merge))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(create_from_archive))
+                .route_layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
+        )
 }
 
 const MAX_POOLS_PER_PAGE: i64 = 1000;
@@ -438,6 +447,153 @@ async fn delete(
             Ok::<_, ApiError>(Json(()))
         })
         .await
+}
+
+/// Request body for importing a comic archive as a pool.
+#[derive(Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct PoolFromArchiveBody {
+    /// URL to fetch the archive from. Required for JSON requests.
+    archive_url: Option<Url>,
+    /// Pool name. Defaults to the archive file name.
+    name: Option<String>,
+    /// Safety for newly created posts. Defaults to safe.
+    safety: Option<PostSafety>,
+}
+
+/// Multipart form for archive imports.
+#[allow(dead_code)]
+#[derive(ToSchema)]
+struct MultipartArchiveImport {
+    /// JSON metadata (same structure as JSON request body).
+    metadata: PoolFromArchiveBody,
+    /// The CBZ/ZIP archive file.
+    #[schema(format = Binary)]
+    archive: Option<String>,
+}
+
+/// Result of importing a comic archive as a pool.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveImportSummary {
+    /// Identifier of the created pool.
+    pool_id: i64,
+    /// Number of posts in the created pool.
+    post_count: usize,
+    /// Pages matched to existing posts by exact checksum.
+    matched_exact: usize,
+    /// Pages matched to existing posts by perceptual similarity.
+    matched_similar: usize,
+    /// Pages uploaded as new posts.
+    created: usize,
+    /// Pages that could not be resolved and were left out of the pool.
+    failed_pages: Vec<String>,
+}
+
+/// Imports a comic archive (CBZ) as a pool.
+///
+/// Each page is matched against existing posts: first by exact content
+/// checksum (after running the page through the same transcoding pipeline as
+/// regular uploads), then by perceptual similarity using the configured
+/// `post_similarity_threshold`. Pages with no match are uploaded as new posts.
+/// The pool contains the resolved posts in natural page order.
+///
+/// The archive can be sent directly as multipart form data (`archive` file
+/// part plus optional `metadata` JSON part), or fetched by the server from
+/// `archiveUrl` (JSON request). Fetching from private/LAN addresses requires
+/// `allow_lan_archive_downloads` to be enabled in the server config.
+///
+/// This request can take a long time for archives with many unmatched pages,
+/// as each new post is transcoded.
+#[utoipa::path(
+    post,
+    path = "/pool-from-archive",
+    tag = POOL_TAG,
+    request_body(
+        content(
+            (PoolFromArchiveBody = "application/json"),
+            (MultipartArchiveImport = "multipart/form-data"),
+        )
+    ),
+    responses(
+        (status = 200, body = ArchiveImportSummary),
+        (status = 400, description = "Archive is missing"),
+        (status = 403, description = "Privileges are too low"),
+        (status = 422, description = "Archive is invalid or contains no supported images"),
+    ),
+)]
+async fn create_from_archive(
+    ctx: Ctx,
+    body: JsonOrMultipart<PoolFromArchiveBody>,
+) -> ApiResult<Json<ArchiveImportSummary>> {
+    ctx.verify_privilege(Action::PoolCreate)?;
+    ctx.verify_privilege(Action::PostCreateIdentified)?;
+
+    let (archive_path, default_name, body) = match body {
+        JsonOrMultipart::Json(payload) => {
+            let url = payload
+                .archive_url
+                .clone()
+                .ok_or(ApiError::MissingContent(ResourceType::Pool))?;
+            let default_name = url
+                .path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .unwrap_or("")
+                .to_owned();
+            let archive_path = download::archive_from_url(&ctx.config, url).await?;
+            (archive_path, default_name, payload)
+        }
+        JsonOrMultipart::Multipart(mut payload) => {
+            let mut archive_path = None;
+            let mut default_name = String::new();
+            let mut metadata = PoolFromArchiveBody::default();
+            while let Some(field) = payload.next_field().await? {
+                match field.name() {
+                    Some("archive") => {
+                        default_name = field.file_name().unwrap_or("").to_owned();
+                        archive_path = Some(filesystem::save_uploaded_archive(&ctx.config, field).await?);
+                    }
+                    Some("metadata") => {
+                        let bytes = field.bytes().await?;
+                        metadata = serde_json::from_slice(&bytes)?;
+                    }
+                    _ => (),
+                }
+            }
+            let archive_path = archive_path.ok_or(ApiError::MissingFormData)?;
+            (archive_path, default_name, metadata)
+        }
+    };
+
+    let pool_name = body
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::path::Path::new(&default_name)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().replace(char::is_whitespace, "_"))
+                .unwrap_or_default()
+        });
+    let safety = body.safety.unwrap_or(PostSafety::Safe);
+
+    let Ctx(ctx, connection_pool) = ctx;
+    let import_result = tokio::task::block_in_place(|| {
+        let mut conn = connection_pool.get_blocking()?;
+        comic::import_archive_as_pool(&ctx, &mut conn, &archive_path, &pool_name, safety, &|| false)
+    });
+    // The temporary archive is no longer needed regardless of the outcome.
+    let _ = std::fs::remove_file(&archive_path);
+    let summary = import_result?;
+
+    Ok(Json(ArchiveImportSummary {
+        pool_id: summary.pool_id,
+        post_count: summary.post_count,
+        matched_exact: summary.matched_exact,
+        matched_similar: summary.matched_similar,
+        created: summary.created,
+        failed_pages: summary.failed_pages,
+    }))
 }
 
 #[cfg(test)]

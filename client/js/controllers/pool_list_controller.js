@@ -38,6 +38,9 @@ class PoolListController {
             hostNode: this._pageController.view.pageHeaderHolderNode,
             parameters: ctx.parameters,
             canCreate: api.hasPrivilege("pool_create"),
+            canImport:
+                api.hasPrivilege("pool_create") &&
+                api.hasPrivilege("post_create"),
             canEditPoolCategories: api.hasPrivilege("pool_category_edit"),
         });
         this._headerView.addEventListener(
