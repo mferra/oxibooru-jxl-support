@@ -3,6 +3,7 @@ use crate::content::hash::{Checksum, Md5Checksum};
 use crate::content::signature::COMPRESSED_SIGNATURE_LEN;
 use crate::content::thumbnail::ThumbnailType;
 use crate::content::upload::UploadToken;
+use crate::app::Context;
 use crate::content::{decode, encode, hash, signature, thumbnail, transcode};
 use crate::extract::Ctx;
 use crate::model::enums::{MimeType, PostFlag, PostFlags, PostType};
@@ -87,7 +88,10 @@ pub fn get_or_compute_properties(ctx: &Ctx, content_token: UploadToken) -> ApiRe
 }
 
 /// Computes content properties without storing them in cache.
-fn compute_properties_no_cache(ctx: &Ctx, token: UploadToken) -> ApiResult<CachedProperties> {
+///
+/// Takes a [`Context`] rather than a [`Ctx`] so that it can also be called
+/// from admin tasks, which have no request-scoped connection pool.
+pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResult<CachedProperties> {
     let temp_path = token.path(&ctx.config);
     let mime_type = token.mime_type();
 
@@ -151,7 +155,7 @@ fn compute_properties_no_cache(ctx: &Ctx, token: UploadToken) -> ApiResult<Cache
 /// Checksums always correspond to the stored (possibly transcoded) file so that the
 /// integrity check and duplicate detection work correctly.
 fn maybe_transcode(
-    ctx: &Ctx,
+    ctx: &Context,
     token: UploadToken,
     mime_type: MimeType,
     post_type: PostType,

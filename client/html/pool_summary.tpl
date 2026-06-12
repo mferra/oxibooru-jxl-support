@@ -19,5 +19,8 @@
         <hr/>
         <%= ctx.makeMarkdown(ctx.pool.description || 'This pool has no description yet.') %>
         <p>This pool has <a href='<%- ctx.formatClientLink('posts', {query: 'pool:' + ctx.pool.searchableName}) %>'><%- ctx.pool.postCount %> post(s)</a>.</p>
+        <% if (ctx.pool.postCount) { %>
+            <p><a href='<%= ctx.formatClientLink("pool", ctx.pool.id, "reader") %>'>Read this pool</a> as a continuous scroll.</p>
+        <% } %>
     </section>
 </div>

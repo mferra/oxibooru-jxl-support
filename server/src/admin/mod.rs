@@ -16,6 +16,7 @@ use tracing::{error, info};
 
 pub mod database;
 mod input;
+pub mod pool;
 pub mod post;
 mod user;
 
@@ -100,6 +101,8 @@ pub enum AdminTask {
     CalculatePhash,
     #[strum(message = "Merge related posts whose content is pixel-identical (smaller file wins)")]
     MergeDuplicatePosts,
+    #[strum(message = "Import a CBZ archive as a pool, matching pages against existing posts")]
+    ImportCbzAsPool,
 }
 
 /// Checks if server was started in admin mode.
@@ -213,6 +216,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::ConvertPostsToJxl => post::convert_posts_to_jxl(state, post_editor),
         AdminTask::CalculatePhash => post::compute_phash(state, post_editor),
         AdminTask::MergeDuplicatePosts => post::merge_duplicate_posts(state, post_editor),
+        AdminTask::ImportCbzAsPool => pool::import_cbz_as_pool(state, post_editor),
     }
 }
 

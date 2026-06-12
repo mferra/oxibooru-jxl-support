@@ -106,6 +106,12 @@ impl LargeString {
     }
 }
 
+impl From<String> for LargeString {
+    fn from(value: String) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
 impl Deref for LargeString {
     type Target = str;
     fn deref(&self) -> &Self::Target {
