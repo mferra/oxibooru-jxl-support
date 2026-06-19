@@ -64,7 +64,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 ################################ Build Phase ###############################
 FROM chef AS builder
-ENV DOCKER_DEPLOYMENT=1
 
 RUN mkdir -p /data
 
@@ -80,10 +79,10 @@ COPY macros/src macros/src
 ARG TARGET_CPU=x86-64-v2
 ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C link-arg=-static-libgcc -C link-arg=-static-libstdc++ -C link-arg=-lgcc -C link-arg=-lgcc_eh -C link-arg=-lstdc++"
 
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --no-default-features --recipe-path recipe.json
 
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --no-default-features
 
 RUN readelf -d /opt/app/target/release/oxibooru_server | grep -q "NEEDED" \
   && (echo "Binary has dynamic dependencies!" && readelf -d /opt/app/target/release/oxibooru_server | grep NEEDED && exit 1) \
