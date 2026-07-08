@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::Arc;
 use strum::{Display, EnumCount, EnumIter, EnumTable, IntoEnumIterator, IntoStaticStr};
 use url::Url;
 use utoipa::openapi::{ObjectBuilder, RefOr, Schema};
@@ -47,7 +48,7 @@ impl ThumbnailFormat {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ThumbnailConfig {
     pub avatar_width: u32,
     pub avatar_height: u32,
@@ -145,7 +146,7 @@ impl ThumbnailConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SmtpConfig {
     pub host: SmallString,
     pub port: Option<u16>,
@@ -154,7 +155,7 @@ pub struct SmtpConfig {
     pub from: Mailbox,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct AnonymousPreferences {
     pub tag_blacklist: Vec<SmallString>,
     pub tag_category_blacklist: Vec<SmallString>,
@@ -330,7 +331,7 @@ impl PartialSchema for PrivilegeConfig {
 
 impl ToSchema for PrivilegeConfig {}
 
-#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[schema(rename_all = "camelCase")] // ToSchema doesn't detect serde(rename_all(serialize = ...))
 #[serde(deny_unknown_fields, rename_all(serialize = "camelCase"))]
 pub struct PublicConfig {
@@ -355,7 +356,7 @@ pub struct PublicConfig {
     pub privileges: PrivilegeConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -437,14 +438,14 @@ impl Config {
 
 /// Deserializes the `config.toml`.
 /// Any values not present will default to the corresponding value in `config.toml.dist`.
-pub fn create() -> Config {
+pub fn create() -> Arc<Config> {
     if cfg!(test) {
         panic!("Production config disallowed in test build!")
     } else {
         let config_path =
             std::env::args().find_map(|arg| arg.strip_prefix("--config-path=").map(|path| path.to_owned()));
         let config_path = config_path.as_deref().unwrap_or("config");
-        create_config(Some(config_path))
+        Arc::new(create_config(Some(config_path)))
     }
 }
 
