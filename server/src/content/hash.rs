@@ -47,7 +47,11 @@ impl<'a> PostHash<'a> {
     /// Returns URL to post content.
     pub fn content_url(&self, content_type: MimeType) -> String {
         const POSTS_DIRECTORY: Directory = Directory::Posts;
-        format!("{}/{POSTS_DIRECTORY}/{self}.{}", self.config.data_url, content_type.extension())
+        format!(
+            "{}/{POSTS_DIRECTORY}/{self}.{}",
+            self.config.data_url.trim_end_matches('/'),
+            content_type.extension()
+        )
     }
 
     /// Returns URL to post thumbnail. Will be a generated thumbnail by default or
@@ -68,7 +72,7 @@ impl<'a> PostHash<'a> {
             Directory::GeneratedThumbnails
         };
         let ext = self.config.thumbnails.format.extension();
-        format!("{}/{thumbnail_folder}/{self}.{ext}", self.config.data_url)
+        format!("{}/{thumbnail_folder}/{self}.{ext}", self.config.data_url.trim_end_matches('/'))
     }
 
     /// Returns the bucketed subdirectory and filename stem (without extension) used to
