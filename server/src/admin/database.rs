@@ -39,14 +39,14 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
             let new_path = PostHash::new(&state.config, post_id).generated_thumbnail_path();
             if path != new_path {
                 if let Err(err) = filesystem::move_file(path, &new_path) {
-                    error!("Could not move {path:?} to {new_path:?} for reason: {err}");
+                    error!("Could not move {} to {} for reason: {err}", path.display(), new_path.display());
                 }
                 progress.increment();
             }
@@ -64,14 +64,14 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
             let new_path = PostHash::new(&state.config, post_id).custom_thumbnail_path();
             if path != new_path {
                 if let Err(err) = filesystem::move_file(path, &new_path) {
-                    error!("Could not move {path:?} to {new_path:?} for reason: {err}");
+                    error!("Could not move {} to {} for reason: {err}", path.display(), new_path.display());
                 }
                 progress.increment();
             }
@@ -89,7 +89,7 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
@@ -109,7 +109,7 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
 
             if path != new_path {
                 if let Err(err) = filesystem::move_file(path, &new_path) {
-                    error!("Could not move {path:?} to {new_path:?} for reason: {err}");
+                    error!("Could not move {} to {} for reason: {err}", path.display(), new_path.display());
                 }
                 progress.increment();
             }
@@ -140,7 +140,7 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(username) = path.file_name().map(OsStr::to_string_lossy) else {
-                error!("Unable to convert file name of {path:?} to string");
+                error!("Unable to convert file name of {} to string", path.display());
                 continue;
             };
 
@@ -165,7 +165,7 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
@@ -190,7 +190,7 @@ pub fn reset_thumbnail_sizes_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
@@ -434,7 +434,7 @@ pub fn reset_statistics_impl(state: &AppState) -> AdminResult<()> {
             }
 
             let Some(post_id) = admin::get_post_id(path) else {
-                error!("Cannot determine post ID from file name of {path:?} (expected \"<id>_<hash>.<ext>\"); skipping");
+                error!("Cannot determine post ID from file name of {} (expected \"<id>_<hash>.<ext>\"); skipping", path.display());
                 continue;
             };
 
