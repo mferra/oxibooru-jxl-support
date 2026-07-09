@@ -10,8 +10,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::LazyLock;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use strum::{Display, EnumCount, EnumIter, EnumTable, IntoEnumIterator, IntoStaticStr};
 use url::Url;
 use utoipa::openapi::{ObjectBuilder, RefOr, Schema};
@@ -468,6 +467,7 @@ pub fn port() -> u16 {
 /// environment variables. If `database_override` is not `None`, then it's value will be used in place of `POSTGRES_DB`.
 pub fn database_url(database_override: Option<&str>) -> String {
     const DEFAULT_POSTGRES_PORT: u16 = 5432;
+
     let user = std::env::var("POSTGRES_USER").expect("POSTGRES_USER must be defined in .env");
     let password = std::env::var("POSTGRES_PASSWORD").expect("POSTGRES_PASSWORD must be defined in .env");
     let hostname = std::env::var("POSTGRES_HOST").unwrap_or_else(|_| "localhost".into());
@@ -476,8 +476,12 @@ pub fn database_url(database_override: Option<&str>) -> String {
         .and_then(|port| port.parse().ok())
         .unwrap_or(DEFAULT_POSTGRES_PORT);
     let database = std::env::var("POSTGRES_DB").expect("POSTGRES_DB must be defined in .env");
-    let database = database_override.unwrap_or(&database);
 
+    // Percent-encode credentials to allow for special characters
+    let user = percent_encoding::utf8_percent_encode(&user, NON_ALPHANUMERIC);
+    let password = percent_encoding::utf8_percent_encode(&password, NON_ALPHANUMERIC);
+    let hostname = percent_encoding::utf8_percent_encode(&hostname, NON_ALPHANUMERIC);
+    let database = percent_encoding::utf8_percent_encode(database_override.unwrap_or(&database), NON_ALPHANUMERIC);
     format!("postgres://{user}:{password}@{hostname}:{port}/{database}")
 }
 
