@@ -82,7 +82,7 @@ pub async fn extract<const N: usize>(
         }
 
         // Ensure metadata is JSON
-        if position.is_none() && field.content_type() != Some("application/json") {
+        if position.is_none() && field.content_type().map(str::to_lowercase).as_deref() != Some("application/json") {
             return Err(ApiError::JsonRejection(JsonRejection::MissingJsonContentType(
                 MissingJsonContentType::default(),
             )));
