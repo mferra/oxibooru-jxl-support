@@ -5,6 +5,7 @@ use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types::SmallInt;
 use diesel::{AsExpression, FromSqlRow};
 use image::ImageFormat;
+use mime::Mime;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::ops::{BitOr, BitOrAssign};
@@ -184,6 +185,11 @@ impl MimeType {
             MimeType::Webp => Some(ImageFormat::WebP),
             MimeType::Avif | MimeType::Jxl | MimeType::Mov | MimeType::Mp4 | MimeType::Webm | MimeType::Swf => None,
         }
+    }
+
+    /// Returns the [`Mime`] corresponding to this [`MimeType`].
+    pub fn to_mime(self) -> Mime {
+        Mime::from_str(&self.to_string()).expect("MimeType must be a valid MIME type")
     }
 }
 

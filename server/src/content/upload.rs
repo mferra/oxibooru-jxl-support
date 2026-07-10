@@ -4,9 +4,12 @@ use crate::filesystem::{self, Directory};
 use crate::model::enums::MimeType;
 use axum::extract::multipart::Multipart;
 use axum::extract::rejection::{JsonRejection, MissingJsonContentType};
+use mime::{APPLICATION, JSON, Mime};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 use strum::IntoStaticStr;
+use tracing::warn;
 use uuid::Uuid;
 
 pub const MAX_UPLOAD_SIZE: usize = 4 * 1024_usize.pow(3);
@@ -75,14 +78,25 @@ pub async fn extract<const N: usize>(
     while let Some(field) = form_data.next_field().await? {
         let position = fields
             .iter()
-            .map(Into::<&str>::into)
+            .map(<&str>::from)
             .position(|name| field.name() == Some(name));
+
+        // Skip unexpected fields
         if position.is_none() && field.name() != Some("metadata") {
+            if let Some(name) = field.name() {
+                warn!("Field `{name}` not expected, skipping");
+            } else {
+                warn!("No field name specified, skipping");
+            }
             continue;
         }
 
         // Ensure metadata is JSON
-        if position.is_none() && field.content_type().map(str::to_lowercase).as_deref() != Some("application/json") {
+        let mime = field.content_type().map(Mime::from_str).transpose()?;
+        let is_application_json = mime
+            .as_ref()
+            .is_some_and(|mime| mime.type_() == APPLICATION && (mime.subtype() == JSON || mime.suffix() == Some(JSON)));
+        if position.is_none() && !is_application_json {
             return Err(ApiError::JsonRejection(JsonRejection::MissingJsonContentType(
                 MissingJsonContentType::default(),
             )));
