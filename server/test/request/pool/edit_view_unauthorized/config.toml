@@ -1,6 +1,0 @@
-[public_info.privileges]
-pool_view = "moderator"
-pool_edit_name = "anonymous"
-pool_edit_category = "anonymous"
-pool_edit_description = "anonymous"
-pool_edit_post = "anonymous"

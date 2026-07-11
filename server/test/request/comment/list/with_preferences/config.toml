@@ -1,0 +1,8 @@
+[anonymous_preferences]
+tag_blacklist = ["classic_literature"]
+tag_category_blacklist = ["default"]
+hide_untagged = true
+
+[public_info.privileges]
+comment_view = "anonymous"
+comment_list = "anonymous"
