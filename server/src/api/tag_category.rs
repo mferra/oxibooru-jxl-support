@@ -4,10 +4,11 @@ use crate::api::{DeleteBody, ResourceParams, UnpagedResponse, error};
 use crate::app::{AppState, Context};
 use crate::config::{Action, RegexType};
 use crate::extract::{Ctx, Json, Path, Query};
-use crate::model::enums::{ResourceProperty, ResourceType, UserRank};
+use crate::model::enums::{ResourceProperty, ResourceType};
 use crate::model::tag_category::{NewTagCategory, TagCategory};
 use crate::resource::tag_category::{Field, TagCategoryInfo};
 use crate::schema::{tag, tag_category};
+use crate::search::preferences;
 use crate::string::SmallString;
 use crate::time::DateTime;
 use crate::{api, snapshot};
@@ -22,6 +23,20 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list, create))
         .routes(routes!(get, update, delete))
         .routes(routes!(set_default))
+}
+
+fn verify_visibility(conn: &mut PgConnection, ctx: &Context, category_name: &SmallString) -> ApiResult<TagCategory> {
+    let category = tag_category::table
+        .filter(tag_category::name.eq(category_name))
+        .first(conn)
+        .optional()?
+        .ok_or(ApiError::NotFound(ResourceType::TagCategory))?;
+
+    if preferences::category_hidden(conn, ctx, category_name)? {
+        Err(ApiError::Hidden(ResourceType::TagCategory))
+    } else {
+        Ok(category)
+    }
 }
 
 /// Lists all tag categories.
@@ -335,24 +350,6 @@ async fn delete(
         .await
 }
 
-fn verify_visibility(conn: &mut PgConnection, ctx: &Context, category_name: &SmallString) -> ApiResult<TagCategory> {
-    if ctx.client.rank == UserRank::Anonymous
-        && ctx
-            .config
-            .anonymous_preferences
-            .tag_category_blacklist
-            .contains(category_name)
-    {
-        return Err(ApiError::Hidden(ResourceType::TagCategory));
-    }
-
-    tag_category::table
-        .filter(tag_category::name.eq(category_name))
-        .first(conn)
-        .optional()?
-        .ok_or(ApiError::NotFound(ResourceType::TagCategory))
-}
-
 #[cfg(test)]
 mod test {
     use crate::api::error::ApiResult;
@@ -530,5 +527,23 @@ mod test {
             "tag_category/set_default_view_unauthorized",
         )
         .await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn blacklist_edge_case() -> ApiResult<()> {
+        // Create edge-case tag category name
+        verify_response("POST /tag-categories?fields=name", "tag_category/create_blacklist_edge_case").await?;
+
+        // Try to view tag category using name with different casing
+        verify_response_with_user(
+            UserRank::Anonymous,
+            "GET /tag-category/κοσμοσ",
+            "tag_category/get_blacklist_edge_case",
+        )
+        .await?;
+
+        reset_database();
+        Ok(())
     }
 }
