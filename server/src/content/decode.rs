@@ -274,7 +274,7 @@ fn flash_image(config: &Config, path: &Path) -> ApiResult<Option<DynamicImage>> 
         Ok(Some(frame)) => return Ok(Some(frame)),
         Ok(None) => warn!("FFmpeg gave no image output for flash file, falling back to parsing flash tags..."),
         Err(err) => error!("Failed to extract thumbnail with FFmpeg: {err}"),
-    };
+    }
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
