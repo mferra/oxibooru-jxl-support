@@ -470,7 +470,7 @@ async fn reverse_search_impl(
 ) -> ApiResult<Json<ReverseSearchResponse>> {
     let content =
         Content::new(body.content_token, body.content_url).ok_or(ApiError::MissingContent(ResourceType::Post))?;
-    let content_properties = content.compute_properties(&ctx).await?;
+    let content_properties = content.compute_properties(ctx.clone()).await?;
 
     let Ctx(ctx, connection_pool) = ctx;
     connection_pool
@@ -605,11 +605,11 @@ async fn create_impl(ctx: Ctx, params: ResourceParams<Field>, body: PostCreateBo
 
     let content =
         Content::new(body.content_token, body.content_url).ok_or(ApiError::MissingContent(ResourceType::Post))?;
-    let content_properties = content.remove_or_compute_properties(&ctx).await?;
+    let content_properties = content.remove_or_compute_properties(ctx.clone()).await?;
 
     let Ctx(ctx, connection_pool) = ctx;
     let custom_thumbnail = match Content::new(body.thumbnail_token, body.thumbnail_url) {
-        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Post).await?),
+        Some(content) => Some(content.thumbnail(ctx.clone(), ThumbnailType::Post).await?),
         None => None,
     };
     let flags = content_properties.flags | PostFlags::from_slice(&body.flags.unwrap_or_default());
@@ -969,14 +969,14 @@ async fn update_impl(
     body: PostUpdateBody,
 ) -> ApiResult<Json<PostInfo>> {
     let new_content = match Content::new(body.content_token, body.content_url) {
-        Some(content) => Some(content.remove_or_compute_properties(&ctx).await?),
+        Some(content) => Some(content.remove_or_compute_properties(ctx.clone()).await?),
         None => None,
     };
 
     let Ctx(ctx, connection_pool) = ctx;
     let remove_custom_thumbnail = body.thumbnail_token.as_ref().is_some_and(Option::is_none);
     let custom_thumbnail = match Content::new(body.thumbnail_token.flatten(), body.thumbnail_url) {
-        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Post).await?),
+        Some(content) => Some(content.thumbnail(ctx.clone(), ThumbnailType::Post).await?),
         None => None,
     };
 
@@ -1547,14 +1547,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[parallel]
     async fn reverse_search() -> ApiResult<()> {
         simulate_upload("1_pixel.png", "upload_for_reverse_search.png")?;
         verify_response(&format!("POST /posts/reverse-search/?{FIELDS}"), "post/reverse_search/typical").await
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[serial]
     async fn create() -> ApiResult<()> {
         simulate_upload("1_pixel.png", "cool_post.png")?;
@@ -1750,7 +1750,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[serial]
     async fn preferences() -> ApiResult<()> {
         verify_response_with_user(
@@ -1793,7 +1793,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[parallel]
     async fn error() -> ApiResult<()> {
         verify_response("GET /post/99", "post/get/nonexistent").await?;
@@ -1836,7 +1836,7 @@ mod test {
         reset_sequence(ResourceType::Post)
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[parallel]
     async fn unauthorized() -> ApiResult<()> {
         const USER: UserRank = UserRank::Regular;
@@ -1881,7 +1881,7 @@ mod test {
         verify_response_with_user(USER, "PUT /post/1", "post/edit/download_thumbnail_unauthorized").await
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[serial]
     async fn unicode_edge_cases() -> ApiResult<()> {
         simulate_upload("1_pixel.png", "upload.png")?;
