@@ -277,7 +277,7 @@ fn import_page(
         }
         .insert_into(post::table)
         .get_result(conn)?;
-        let post_hash = PostHash::new(&context.config, new_post.id);
+        let post_hash = PostHash::new(&context.config, new_post.id, None);
 
         NewPostSignature {
             post_id: new_post.id,

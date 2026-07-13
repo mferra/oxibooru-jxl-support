@@ -2,7 +2,6 @@ use crate::app::Context;
 use crate::auth::Client;
 use crate::config::Config;
 use crate::content::hash::PostHash;
-use crate::filesystem::Directory;
 use crate::get_post_stats;
 use crate::model::comment::Comment;
 use crate::model::enums::{AvatarStyle, MimeType, PostFlags, PostSafety, PostType, Rating, Score};
@@ -32,7 +31,6 @@ use serde_with::skip_serializing_none;
 use server_macros::non_nullable_options;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 use strum::EnumString;
 use utoipa::ToSchema;
@@ -235,21 +233,8 @@ impl PostInfo {
         let f = Batcher::new(fields, posts.len());
         let mut owners = f.exec(Field::User, || get_owners(conn, &ctx.config, &posts))?;
         let Ok(mut content_urls) = f.exec(Field::ContentUrl, || Ok::<_, Infallible>(get_content_urls(&ctx.config, &posts)));
-        let custom_thumbnail_exists = if fields[Field::ThumbnailUrl] || fields[Field::HasCustomThumbnail] {
-            let results = custom_thumbnails_exist(&ctx.config, &posts);
-            assert!(results.is_empty() || results.len() == posts.len());
-            results
-        } else {
-            Vec::new()
-        };
-        let Ok(mut thumbnail_urls) = f.exec(Field::ThumbnailUrl, || {
-            Ok::<_, Infallible>(get_thumbnail_urls(&ctx.config, &posts, &custom_thumbnail_exists))
-        });
-        let mut has_custom_thumbnails = if fields[Field::HasCustomThumbnail] {
-            custom_thumbnail_exists
-        } else {
-            Vec::new()
-        };
+        let Ok(mut thumbnail_urls) =
+            f.exec(Field::ThumbnailUrl, || Ok::<_, Infallible>(get_thumbnail_urls(&ctx.config, &posts)));
         let mut tags = f.exec(Field::Tags, || get_tags(conn, &posts))?;
         let mut comments = f.exec(Field::Comments, || get_comments(conn, ctx, &posts))?;
         let mut relations = f.exec(Field::Relations, || get_relations(conn, ctx, &posts))?;
@@ -307,8 +292,11 @@ impl PostInfo {
                 favorited_by: users_who_favorited.pop(),
                 comments: comments.pop(),
                 pools: pools.pop(),
-                has_custom_thumbnail: fields[Field::HasCustomThumbnail]
-                    .then(|| has_custom_thumbnails.pop().expect("size checked above")),
+                has_custom_thumbnail: fields[Field::HasCustomThumbnail].then(|| {
+                    PostHash::new(&ctx.config, post.id, Some(post.custom_thumbnail_size))
+                        .custom_thumbnail_path()
+                        .exists()
+                }),
             })
             .collect::<Vec<_>>();
         results.reverse();
@@ -347,47 +335,14 @@ fn get_owners(conn: &mut PgConnection, config: &Config, posts: &[Post]) -> Query
 fn get_content_urls(config: &Config, posts: &[Post]) -> Vec<String> {
     posts
         .iter()
-        .map(|post| PostHash::new(config, post.id).content_url(post.mime_type))
+        .map(|post| PostHash::new(config, post.id, Some(post.custom_thumbnail_size)).content_url(post.mime_type))
         .collect()
 }
 
-fn get_thumbnail_urls(config: &Config, posts: &[Post], custom_thumbnail_exists: &[bool]) -> Vec<String> {
+fn get_thumbnail_urls(config: &Config, posts: &[Post]) -> Vec<String> {
     posts
         .iter()
-        .zip(custom_thumbnail_exists)
-        .map(|(post, &has_custom)| PostHash::new(config, post.id).thumbnail_url_with_custom(has_custom))
-        .collect()
-}
-
-/// Checks, for each post, whether a custom thumbnail exists on disk.
-///
-/// Posts are stored in bucketed subdirectories (see [`PostHash::bucket_location`]), so posts
-/// in the same batch typically share only a handful of directories. This lists each distinct
-/// bucket directory once and checks membership in-memory, instead of doing one `exists()`
-/// filesystem call per post.
-fn custom_thumbnails_exist(config: &Config, posts: &[Post]) -> Vec<bool> {
-    let ext = config.thumbnails.format.extension();
-    let base_dir = config.path(Directory::CustomThumbnails);
-
-    let mut dir_listings: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-    posts
-        .iter()
-        .map(|post| {
-            let (bucket_dir, filename_stem) = PostHash::new(config, post.id).bucket_location();
-            let dir_path = base_dir.join(&bucket_dir);
-            let filename = format!("{filename_stem}.{ext}");
-            let listing = dir_listings.entry(dir_path).or_insert_with_key(|dir_path| {
-                std::fs::read_dir(dir_path)
-                    .map(|entries| {
-                        entries
-                            .filter_map(|entry| entry.ok())
-                            .filter_map(|entry| entry.file_name().into_string().ok())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
-            listing.contains(&filename)
-        })
+        .map(|post| PostHash::new(config, post.id, Some(post.custom_thumbnail_size)).thumbnail_url())
         .collect()
 }
 
@@ -504,7 +459,7 @@ fn get_relations(conn: &mut PgConnection, ctx: &Context, posts: &[Post]) -> Quer
                 .into_iter()
                 .map(|relation| MicroPost {
                     id: relation.child_id,
-                    thumbnail_url: PostHash::new(&ctx.config, relation.child_id).thumbnail_url(),
+                    thumbnail_url: PostHash::new(&ctx.config, relation.child_id, None).thumbnail_url(),
                 })
                 .collect()
         })

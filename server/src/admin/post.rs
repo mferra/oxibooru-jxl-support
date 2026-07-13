@@ -181,7 +181,7 @@ fn check_integrity_in_parallel(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let content_path = PostHash::new(&state.config, post_id, None).content_path(mime_type);
     let file_checksum = match hash::compute_checksums(&content_path) {
         Ok((checksum, _)) => checksum,
         Err(err) => {
@@ -245,7 +245,7 @@ fn recompute_post_type_in_parallel(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let content_path = PostHash::new(&state.config, post_id, None).content_path(mime_type);
     let is_animated_webp = mime_type == MimeType::Webp && transcode::webp_is_animated(&content_path);
     let post_type = if is_animated_webp {
         PostType::Animation
@@ -280,7 +280,7 @@ fn recompute_checksum_in_parallel(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let image_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let image_path = PostHash::new(&state.config, post_id, None).content_path(mime_type);
     let (checksum, md5_checksum) = match hash::compute_checksums(&image_path) {
         Ok(checksums) => checksums,
         Err(err) => {
@@ -333,7 +333,7 @@ fn recompute_signature_in_parallel(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
+    let content_path = PostHash::new(&state.config, post_id, None).content_path(mime_type);
     let image = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(image) => image,
         Err(err) => {
@@ -401,7 +401,7 @@ fn regenerate_thumbnail_in_parallel(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let post_hash = PostHash::new(&state.config, post_id);
+    let post_hash = PostHash::new(&state.config, post_id, None);
     if !force && let Some(thumbnail_size) = usable_thumbnail_size(&post_hash.generated_thumbnail_path()) {
         // The thumbnail is up to date, but the size cached in the database may not be,
         // so correct it while we have the file size at hand.
@@ -514,7 +514,7 @@ fn convert_post_to_jxl_in_parallel(
         return Ok(());
     }
 
-    let post_hash = PostHash::new(&state.config, post_id);
+    let post_hash = PostHash::new(&state.config, post_id, None);
     let old_content_path = post_hash.content_path(mime_type);
 
     // Skip animated WebP (maps to PostType::Image but is an animation).
@@ -756,7 +756,7 @@ fn compute_phash_for_post(
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
-    let post_hash = PostHash::new(&state.config, post_id);
+    let post_hash = PostHash::new(&state.config, post_id, None);
     let content_path = post_hash.content_path(mime_type);
 
     // Decoding can abort the process outright rather than returning an error, by overflowing
@@ -939,8 +939,8 @@ fn merge_pair_if_duplicate(
         return;
     }
 
-    let merge_to_path = PostHash::new(&state.config, merge_to_id).content_path(merge_to.mime_type);
-    let absorbed_path = PostHash::new(&state.config, absorbed_id).content_path(absorbed.mime_type);
+    let merge_to_path = PostHash::new(&state.config, merge_to_id, None).content_path(merge_to.mime_type);
+    let absorbed_path = PostHash::new(&state.config, absorbed_id, None).content_path(absorbed.mime_type);
     let merge_to_image = match decode::image(&merge_to_path, merge_to.mime_type) {
         Ok(image) => image,
         Err(err) => {
@@ -1013,7 +1013,7 @@ fn merge_pair_if_duplicate(
 /// format config change, so the configured format is tried first and then the other
 /// known format.
 fn decode_generated_thumbnail(state: &AppState, post_id: i64) -> ApiResult<DynamicImage> {
-    let post_hash = PostHash::new(&state.config, post_id);
+    let post_hash = PostHash::new(&state.config, post_id, None);
     let (first, second) = match state.config.thumbnails.format {
         ThumbnailFormat::Jpeg => (("jpg", MimeType::Jpeg), ("jxl", MimeType::Jxl)),
         ThumbnailFormat::Jxl => (("jxl", MimeType::Jxl), ("jpg", MimeType::Jpeg)),

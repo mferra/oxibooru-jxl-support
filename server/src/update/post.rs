@@ -147,8 +147,8 @@ pub fn merge(
 ) -> ApiResult<()> {
     let absorbed_id = absorbed_post.id;
     let merge_to_id = merge_to_post.id;
-    let absorbed_hash = PostHash::new(config, absorbed_id);
-    let merge_to_hash = PostHash::new(config, merge_to_id);
+    let absorbed_hash = PostHash::new(config, absorbed_id, Some(absorbed_post.custom_thumbnail_size));
+    let merge_to_hash = PostHash::new(config, merge_to_id, Some(merge_to_post.custom_thumbnail_size));
 
     // Merge relations
     let involved_relations: Vec<PostRelation> = post_relation::table
@@ -348,7 +348,7 @@ pub fn recompute_phash(config: &Config, conn: &mut PgConnection, post_id: i64) -
         .optional()?
         .ok_or(ApiError::NotFound(ResourceType::Post))?;
 
-    let content_path = PostHash::new(config, post_id).content_path(mime_type);
+    let content_path = PostHash::new(config, post_id, None).content_path(mime_type);
     let image = decode::representative_image(config, &content_path, mime_type)?;
     let phash_value = hash::compute_phash(&image);
 
@@ -367,7 +367,7 @@ pub fn regenerate_thumbnail(config: &Config, conn: &mut PgConnection, post_id: i
         .optional()?
         .ok_or(ApiError::NotFound(ResourceType::Post))?;
 
-    let post_hash = PostHash::new(config, post_id);
+    let post_hash = PostHash::new(config, post_id, None);
     let content_path = post_hash.content_path(mime_type);
     let image = decode::representative_image(config, &content_path, mime_type)?;
     let thumb = thumbnail::create(config, &image, ThumbnailType::Post);
@@ -392,7 +392,7 @@ pub fn convert_to_jxl(config: &Config, conn: &mut PgConnection, post_id: i64) ->
         return Err(ApiError::JxlConversionUnsupported(mime_type));
     }
 
-    let post_hash = PostHash::new(config, post_id);
+    let post_hash = PostHash::new(config, post_id, None);
     let old_content_path = post_hash.content_path(mime_type);
     if mime_type == MimeType::Webp && transcode::webp_is_animated(&old_content_path) {
         return Err(ApiError::JxlConversionUnsupported(mime_type));
