@@ -45,7 +45,7 @@ impl<'de> Deserialize<'de> for UploadToken {
         D: serde::Deserializer<'de>,
     {
         let token = String::deserialize(deserializer)?;
-        if token.contains('/') || token.contains('\\') {
+        if token.contains('/') || token.contains('\\') || token.contains(':') {
             return Err(serde::de::Error::custom("invalid upload token"));
         }
 
