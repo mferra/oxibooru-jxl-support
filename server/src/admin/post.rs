@@ -420,7 +420,7 @@ fn regenerate_thumbnail_in_parallel(
 
     let content_path = post_hash.content_path(mime_type);
     let thumbnail = match decode::representative_image(&state.config, &content_path, mime_type) {
-        Ok(image) => thumbnail::create(&state.config, &image, ThumbnailType::Post),
+        Ok(image) => thumbnail::create(&state.config, image, ThumbnailType::Post),
         Err(err) => {
             // Decoding is where FFmpeg can time out on a wedged video, so keep the post's
             // existing thumbnail and move on to the next one rather than aborting the run.
@@ -618,12 +618,12 @@ fn convert_post_to_jxl_in_parallel(
         }
     }
 
-    // Generate thumbnail.
-    let thumb = thumbnail::create(&state.config, &decoded, ThumbnailType::Post);
-
     // Compute the pHash from the already-decoded image when missing, so the pHash
     // backfill task doesn't have to decode this file a second time.
     let phash_value = existing_phash.unwrap_or_else(|| hash::compute_phash(&decoded));
+
+    // Generate thumbnail. This consumes the decoded image, so it comes last.
+    let thumb = thumbnail::create(&state.config, decoded, ThumbnailType::Post);
 
     // Persist everything atomically-ish: update DB then swap files.
     let db_result = conn.transaction(|conn| {

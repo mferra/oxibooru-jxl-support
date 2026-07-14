@@ -370,7 +370,7 @@ pub fn regenerate_thumbnail(config: &Config, conn: &mut PgConnection, post_id: i
     let post_hash = PostHash::new(config, post_id, None);
     let content_path = post_hash.content_path(mime_type);
     let image = decode::representative_image(config, &content_path, mime_type)?;
-    let thumb = thumbnail::create(config, &image, ThumbnailType::Post);
+    let thumb = thumbnail::create(config, image, ThumbnailType::Post);
     thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated)?;
     Ok(())
 }
@@ -432,7 +432,7 @@ pub fn convert_to_jxl(config: &Config, conn: &mut PgConnection, post_id: i64) ->
     if let Err(err) = std::fs::remove_file(&old_content_path) {
         warn!("Post {post_id}: converted but could not remove old {mime_type} file: {err}");
     }
-    let thumb = thumbnail::create(config, &decoded, ThumbnailType::Post);
+    let thumb = thumbnail::create(config, decoded, ThumbnailType::Post);
     if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
         warn!("Post {post_id}: converted but could not remove old thumbnail: {err}");
     }

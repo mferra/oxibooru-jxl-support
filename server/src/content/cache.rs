@@ -112,7 +112,6 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
     // Decode representative image for signature, thumbnail, and pHash computation (from original file).
     let image = decode::representative_image(&ctx.config, &temp_path, mime_type)?;
     let computed_signature = signature::compute(&image);
-    let computed_thumbnail = thumbnail::create(&ctx.config, &image, ThumbnailType::Post);
     let computed_phash = hash::compute_phash(&image);
     let width = i32::try_from(image.width()).map_err(|_| LimitErrorKind::DimensionError)?;
     let height = i32::try_from(image.height()).map_err(|_| LimitErrorKind::DimensionError)?;
@@ -132,7 +131,8 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
         checksum,
         md5_checksum,
         signature: computed_signature,
-        thumbnail: computed_thumbnail,
+        // Created last, since it consumes the image the transcoder above still needed.
+        thumbnail: thumbnail::create(&ctx.config, image, ThumbnailType::Post),
         width,
         height,
         mime_type: final_mime,
