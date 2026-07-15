@@ -337,10 +337,10 @@ async fn delete(
     connection_pool
         .transaction(move |conn| {
             let category = verify_visibility(conn, &ctx, &name)?;
-            api::verify_version(category.last_edit_time, *client_version)?;
             if category.id == 0 {
                 return Err(ApiError::DeleteDefault(ResourceType::TagCategory));
             }
+            api::verify_version(category.last_edit_time, *client_version)?;
 
             diesel::delete(tag_category::table.find(category.id)).execute(conn)?;
             snapshot::tag_category::deletion_snapshot(conn, ctx.client, &category)?;
