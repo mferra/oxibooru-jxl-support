@@ -26,6 +26,7 @@ pub enum ErrorName {
     DimensionLimitsExceeded,
     DimensionMismatch,
     DirectoryNotEmpty,
+    DisabledToken,
     DuplicatePost,
     EmailAddressInvalidDomain,
     EmailAddressInvalidInput,
@@ -335,6 +336,7 @@ impl ErrorKind for base64::DecodeError {
 impl ErrorKind for crate::auth::header::AuthenticationError {
     fn kind(&self) -> ErrorName {
         match self {
+            Self::DisabledToken => ErrorName::DisabledToken,
             Self::ExpiredToken => ErrorName::ExpiredToken,
             Self::FailedConnection(_) => ErrorName::FailedConnection,
             Self::FailedQuery(err) => err.kind(),
