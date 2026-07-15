@@ -104,9 +104,9 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
         PostType::Flash => decode::swf_has_audio(&temp_path)?,
     };
     let flags = if has_sound {
-        PostFlags::new_with(PostFlag::Sound)
+        PostFlags::one(PostFlag::Sound)
     } else {
-        PostFlags::new()
+        PostFlags::none()
     };
 
     // Decode representative image for signature, thumbnail, and pHash computation (from original file).
