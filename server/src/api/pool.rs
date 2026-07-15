@@ -1,11 +1,12 @@
 use crate::api::doc::POOL_TAG;
 use crate::api::error::{ApiError, ApiResult};
-use crate::api::{DeleteBody, MergeBody, PageParams, PagedResponse, ResourceParams};
 use crate::app::AppState;
 use crate::config::Action;
 use crate::content::download;
 use crate::content::upload::MAX_UPLOAD_SIZE;
-use crate::extract::{Ctx, Json, JsonOrMultipart, Path, Query};
+use crate::extract::{
+    Ctx, DeleteBody, Json, JsonOrMultipart, MergeBody, PageParams, PagedResponse, Path, Query, ResourceParams,
+};
 use crate::model::enums::{PostSafety, ResourceType};
 use crate::model::pool::{NewPool, Pool};
 use crate::resource::pool::{Field, PoolInfo};
@@ -38,8 +39,6 @@ pub fn routes() -> OpenApiRouter<AppState> {
                 .route_layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
         )
 }
-
-const MAX_POOLS_PER_PAGE: i64 = 1000;
 
 /// Searches for pools.
 ///
@@ -90,7 +89,7 @@ async fn list(
     ctx.verify_privilege(Action::PoolList)?;
 
     let offset = page.offset.unwrap_or(0);
-    let limit = std::cmp::min(page.limit.get(), MAX_POOLS_PER_PAGE);
+    let limit = page.limit();
     connection_pool
         .transaction(move |conn| {
             let mut query_builder = QueryBuilder::new(&ctx, resource.criteria())?;

@@ -1,9 +1,9 @@
 use crate::api::doc::COMMENT_TAG;
 use crate::api::error::{ApiError, ApiResult};
-use crate::api::{self, DeleteBody, PageParams, PagedResponse, RatingBody, ResourceParams, error};
+use crate::api::{self, error};
 use crate::app::{AppState, Context};
 use crate::config::Action;
-use crate::extract::{Ctx, Json, Path, Query};
+use crate::extract::{Ctx, DeleteBody, Json, PageParams, PagedResponse, Path, Query, RatingBody, ResourceParams};
 use crate::model::comment::{NewComment, NewCommentScore};
 use crate::model::enums::{ResourceType, Score};
 use crate::resource::comment::{CommentInfo, Field};
@@ -25,7 +25,21 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(rate))
 }
 
-const MAX_COMMENTS_PER_PAGE: i64 = 1000;
+fn verify_visibility(conn: &mut PgConnection, ctx: &Context, comment_id: i64) -> ApiResult<()> {
+    let comment_exists: bool = diesel::select(exists(comment::table.find(comment_id))).first(conn)?;
+    if !comment_exists {
+        return Err(ApiError::NotFound(ResourceType::Comment));
+    }
+
+    if let Some(hidden_posts) = preferences::hidden_posts(ctx, comment::post_id) {
+        let comment_lookup = comment::table.find(comment_id).filter(exists(hidden_posts));
+        let comment_hidden: bool = diesel::select(exists(comment_lookup)).first(conn)?;
+        if comment_hidden {
+            return Err(ApiError::Hidden(ResourceType::Comment));
+        }
+    }
+    Ok(())
+}
 
 /// Lists comments.
 ///
@@ -76,7 +90,7 @@ async fn list(
     ctx.verify_privilege(Action::CommentList)?;
 
     let offset = page.offset.unwrap_or(0);
-    let limit = std::cmp::min(page.limit.get(), MAX_COMMENTS_PER_PAGE);
+    let limit = page.limit();
     connection_pool
         .transaction(move |conn| {
             let mut query_builder = QueryBuilder::new(&ctx, resource.criteria())?;
@@ -344,22 +358,6 @@ async fn delete(
             Ok::<_, ApiError>(Json(()))
         })
         .await
-}
-
-fn verify_visibility(conn: &mut PgConnection, ctx: &Context, comment_id: i64) -> ApiResult<()> {
-    let comment_exists: bool = diesel::select(exists(comment::table.find(comment_id))).first(conn)?;
-    if !comment_exists {
-        return Err(ApiError::NotFound(ResourceType::Comment));
-    }
-
-    if let Some(hidden_posts) = preferences::hidden_posts(ctx, comment::post_id) {
-        let comment_lookup = comment::table.find(comment_id).filter(exists(hidden_posts));
-        let comment_hidden: bool = diesel::select(exists(comment_lookup)).first(conn)?;
-        if comment_hidden {
-            return Err(ApiError::Hidden(ResourceType::Comment));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
