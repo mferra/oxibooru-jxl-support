@@ -29,7 +29,7 @@ use utoipa::{PartialSchema, ToSchema};
 pub struct ParseExtensionError(String);
 
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("{0} is not a supported file extension")]
+#[error("Content-Type {0} is not supported")]
 pub struct ParseMimeTypeError(String);
 
 #[derive(Debug, Error)]
