@@ -18,8 +18,8 @@ use crate::model::post::{
 };
 use crate::resource::post::{Field, Note, PostInfo};
 use crate::schema::{post, post_favorite, post_feature, post_score, post_signature, post_statistics};
+use crate::search::Builder;
 use crate::search::post::QueryBuilder;
-use crate::search::{Builder, preferences};
 use crate::snapshot::post::SnapshotData;
 use crate::string::{LargeString, SmallString};
 use crate::time::DateTime;
@@ -74,6 +74,22 @@ struct Multipart<T> {
     /// Thumbnail file.
     #[schema(format = Binary)]
     thumbnail: Option<String>,
+}
+
+fn verify_visibility(conn: &mut PgConnection, ctx: &Context, post_id: i64) -> ApiResult<()> {
+    let post_exists: bool = diesel::select(exists(post::table.find(post_id))).first(conn)?;
+    if !post_exists {
+        return Err(ApiError::NotFound(ResourceType::Post));
+    }
+
+    if let Some(hidden_posts) = ctx.preferences().hidden_posts(post_statistics::post_id) {
+        let post_lookup = hidden_posts.filter(post_statistics::post_id.eq(post_id));
+        let post_hidden: bool = diesel::select(exists(post_lookup)).first(conn)?;
+        if post_hidden {
+            return Err(ApiError::Hidden(ResourceType::Post));
+        }
+    }
+    Ok(())
 }
 
 /// Runs an `update` that may add `tags` to a post as a transaction.
@@ -388,7 +404,7 @@ async fn get_featured(
                 .into_boxed();
 
             // Apply preferences to post features
-            if let Some(hidden_posts) = preferences::hidden_posts(&ctx, post_feature::post_id) {
+            if let Some(hidden_posts) = ctx.preferences().hidden_posts(post_feature::post_id) {
                 featured = featured.filter(not(exists(hidden_posts)));
             }
 
@@ -1411,22 +1427,6 @@ async fn convert_to_jxl(
         .map(Json)
 }
 
-fn verify_visibility(conn: &mut PgConnection, ctx: &Context, post_id: i64) -> ApiResult<()> {
-    let post_exists: bool = diesel::select(exists(post::table.find(post_id))).first(conn)?;
-    if !post_exists {
-        return Err(ApiError::NotFound(ResourceType::Post));
-    }
-
-    if let Some(hidden_posts) = preferences::hidden_posts(ctx, post_statistics::post_id) {
-        let post_lookup = hidden_posts.filter(post_statistics::post_id.eq(post_id));
-        let post_hidden: bool = diesel::select(exists(post_lookup)).first(conn)?;
-        if post_hidden {
-            return Err(ApiError::Hidden(ResourceType::Post));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod test {
     use crate::api::error::ApiResult;
@@ -1905,7 +1905,6 @@ mod test {
         verify_response("PUT /post/1", "post/edit/malicious_thumbnail_token").await
     }
 
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
     async fn convert_to_jxl() -> ApiResult<()> {
@@ -1914,7 +1913,6 @@ mod test {
         reset_database();
         Ok(())
     }
-
 
     #[tokio::test]
     #[parallel]
@@ -1927,14 +1925,12 @@ mod test {
         .await
     }
 
-
     #[tokio::test]
     #[parallel]
     async fn convert_to_jxl_unsupported() -> ApiResult<()> {
         const POST_ID: i64 = 5;
         verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl_unsupported").await
     }
-
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
@@ -1955,7 +1951,6 @@ mod test {
         Ok(())
     }
 
-
     #[tokio::test]
     #[parallel]
     async fn recompute_phash_insufficient_privileges() -> ApiResult<()> {
@@ -1963,14 +1958,12 @@ mod test {
             .await
     }
 
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
     async fn regenerate_thumbnail() -> ApiResult<()> {
         const POST_ID: i64 = 4;
         verify_response(&format!("POST /post/{POST_ID}/regenerate-thumbnail/?{FIELDS}"), "post/regenerate_thumbnail").await
     }
-
 
     #[tokio::test]
     #[parallel]
