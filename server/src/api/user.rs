@@ -180,7 +180,7 @@ async fn create_impl(
     }
 
     if let Some(rank) = body.rank
-        && rank > ctx.config.default_rank()
+        && rank > ctx.config.public_info.default_user_rank
     {
         api::verify_privilege(ctx.client, rank)?;
     }
@@ -215,7 +215,7 @@ async fn create_impl(
                     .select(database_statistics::user_count)
                     .first(conn)?;
                 let rank = if user_count > 0 {
-                    body.rank.unwrap_or(ctx.config.default_rank())
+                    body.rank.unwrap_or(ctx.config.public_info.default_user_rank)
                 } else {
                     UserRank::Administrator
                 };
