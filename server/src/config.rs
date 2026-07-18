@@ -138,7 +138,7 @@ impl TranscodingConfig {
     }
 
     fn default_image_formats() -> Vec<SmallString> {
-        ["png", "jpg", "bmp"].into_iter().map(SmallString::new).collect()
+        ["png", "jpg", "bmp"].into_iter().map(SmallString::from).collect()
     }
 
     /// Returns true when static images of `mime_type` should be converted to JXL.

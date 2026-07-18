@@ -159,7 +159,7 @@ pub fn import_archive_as_pool(
         .insert_into(pool::table)
         .get_result(conn)?;
 
-        let names = vec![SmallString::from(pool_name.to_owned())];
+        let names = vec![SmallString::from(pool_name)];
         update::pool::set_names(conn, &context.config, new_pool.id, &names)?;
         update::pool::add_posts(conn, new_pool.id, 0, &post_ids)?;
 
