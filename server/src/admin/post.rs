@@ -437,7 +437,7 @@ fn regenerate_thumbnail_in_parallel(
     }
 
     let mut conn = state.connection_pool.get_blocking()?;
-    if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumbnail, ThumbnailCategory::Generated) {
+    if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, thumbnail, ThumbnailCategory::Generated) {
         error!("Cannot save thumbnail for post {post_id} for reason: {err}");
     } else {
         progress.increment();
@@ -689,7 +689,7 @@ fn convert_post_to_jxl_in_parallel(
     if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
         warn!("Post {post_id}: converted but could not remove old thumbnail: {err}");
     }
-    if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumb, ThumbnailCategory::Generated) {
+    if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, thumb, ThumbnailCategory::Generated) {
         warn!("Post {post_id}: converted but thumbnail regeneration failed: {err}");
     }
 

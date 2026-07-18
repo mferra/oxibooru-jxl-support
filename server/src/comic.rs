@@ -288,7 +288,7 @@ fn import_page(
         .execute(conn)?;
 
         filesystem::move_file(&final_temp_path, &post_hash.content_path(properties.mime_type))?;
-        update::post::thumbnail(conn, &post_hash, &properties.thumbnail, ThumbnailCategory::Generated)?;
+        update::post::thumbnail(conn, &post_hash, properties.thumbnail, ThumbnailCategory::Generated)?;
 
         let post_data = snapshot::post::SnapshotData {
             safety: new_post.safety,

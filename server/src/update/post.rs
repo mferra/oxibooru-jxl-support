@@ -35,7 +35,7 @@ pub fn last_edit_time(conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
 pub fn thumbnail(
     conn: &mut PgConnection,
     post_hash: &PostHash,
-    thumbnail: &DynamicImage,
+    thumbnail: DynamicImage,
     thumbnail_type: ThumbnailCategory,
 ) -> ApiResult<i64> {
     filesystem::delete_post_thumbnail(post_hash, thumbnail_type)?;
@@ -377,7 +377,7 @@ pub fn regenerate_thumbnail(config: &Config, conn: &mut PgConnection, post_id: i
     let content_path = post_hash.content_path(mime_type);
     let image = decode::representative_image(config, &content_path, mime_type)?;
     let thumb = thumbnail::create(config, image, ThumbnailType::Post);
-    thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated)?;
+    thumbnail(conn, &post_hash, thumb, ThumbnailCategory::Generated)?;
     Ok(())
 }
 
@@ -442,7 +442,7 @@ pub fn convert_to_jxl(config: &Config, conn: &mut PgConnection, post_id: i64) ->
     if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
         warn!("Post {post_id}: converted but could not remove old thumbnail: {err}");
     }
-    if let Err(err) = thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated) {
+    if let Err(err) = thumbnail(conn, &post_hash, thumb, ThumbnailCategory::Generated) {
         warn!("Post {post_id}: converted but thumbnail regeneration failed: {err}");
     }
     Ok(())

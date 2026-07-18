@@ -403,7 +403,7 @@ async fn update_impl(
                         Action::UserEditAnyRank
                     };
                     ctx.verify_privilege(action)?;
-                    if rank > ctx.config.default_rank() {
+                    if rank > ctx.config.public_info.default_user_rank {
                         api::verify_privilege(ctx.client, rank)?;
                     }
 
