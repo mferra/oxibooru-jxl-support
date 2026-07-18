@@ -112,11 +112,6 @@ pub enum AdminTask {
     ImportCbzAsPool,
 }
 
-/// Checks if server was started in admin mode.
-pub fn enabled() -> bool {
-    std::env::args().any(|arg| arg == "--admin")
-}
-
 /// Returns the task name passed immediately after `--admin`, if any (e.g. `--admin recompute_index`).
 /// Used to run a single task non-interactively, without entering the REPL, so admin tasks can be
 /// triggered from cron/CI. A missing or flag-like (`-`-prefixed) next argument means the REPL should

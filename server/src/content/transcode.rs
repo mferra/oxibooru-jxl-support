@@ -22,7 +22,7 @@ static TRANSCODE_TIMEOUT: LazyLock<Duration> =
 /// Probes whether the FFmpeg binary at startup supports AV1 encoding via libaom-av1.
 /// Returns false (with a warning) if the binary is missing or the encoder is absent.
 pub fn probe_av1_support() -> bool {
-    match Command::new(ffmpeg::PATH).args(["-encoders", "-v", "quiet"]).output() {
+    match Command::new(ffmpeg::path()).args(["-encoders", "-v", "quiet"]).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let supported = stdout.contains("libaom-av1");

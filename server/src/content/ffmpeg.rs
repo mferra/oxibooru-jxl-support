@@ -7,11 +7,27 @@
 use crate::api::error::{ApiError, ApiResult};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tracing::error;
 
-pub const PATH: &str = "/opt/app/ffmpeg";
+/// Where the bundled `FFmpeg` lives in the Docker image, used unless `--ffmpeg-path` says otherwise.
+const DEFAULT_PATH: &str = "/opt/app/ffmpeg";
+
+static PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Overrides the `FFmpeg` binary location. Meant to be called once at startup with the value of
+/// the `--ffmpeg-path` argument; later calls are ignored.
+pub fn set_path(path: PathBuf) {
+    let _ = PATH.set(path);
+}
+
+/// Returns the `FFmpeg` binary to run.
+pub fn path() -> &'static Path {
+    PATH.get().map_or(Path::new(DEFAULT_PATH), PathBuf::as_path)
+}
 
 /// Cap on the `FFmpeg` log lines kept per run, so a file that warns on every frame can't grow
 /// an unbounded error message. The tail is kept rather than the head, since that is where both
@@ -53,7 +69,7 @@ pub struct Output {
 ///
 /// `description` is a participle phrase naming the work ("extracting a frame from ...").
 pub fn run(description: &str, args: &[&str], timeout: Duration) -> ApiResult<Output> {
-    let mut child = Command::new(PATH)
+    let mut child = Command::new(path())
         .arg("-hide_banner")
         .args(args)
         .stdin(Stdio::null())

@@ -44,8 +44,6 @@ pub enum ErrorName {
     EmptySwf,
     EmptyValue,
     EmptyVideo,
-    EnvironmentVariableNotPresent,
-    EnvironmentVariableNotUnicode,
     ExecutableFileBusy,
     ExpiredToken,
     ExpressionFailsRegex,
@@ -522,15 +520,6 @@ impl ErrorKind for serde_json::error::Category {
             Self::Syntax => ErrorName::JsonInvalidSyntax,
             Self::Data => ErrorName::JsonInvalidData,
             Self::Eof => ErrorName::JsonUnexpectedEOF,
-        }
-    }
-}
-
-impl ErrorKind for std::env::VarError {
-    fn kind(&self) -> ErrorName {
-        match self {
-            Self::NotPresent => ErrorName::EnvironmentVariableNotPresent,
-            Self::NotUnicode(_) => ErrorName::EnvironmentVariableNotUnicode,
         }
     }
 }
