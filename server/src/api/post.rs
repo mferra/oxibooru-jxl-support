@@ -26,8 +26,7 @@ use crate::time::DateTime;
 use crate::update::tag::FetchMode;
 use crate::{api, db, filesystem, snapshot, update};
 use axum::extract::DefaultBodyLimit;
-use diesel::dsl::{exists, not, sql};
-use diesel::sql_types::Integer;
+use diesel::dsl::{exists, not};
 use diesel::{
     ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl, SaveChangesDsl,
     SelectableHelper,
@@ -1305,19 +1304,14 @@ async fn unfavorite(
     ctx.verify_privilege(Action::PostFavorite)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
-
     connection_pool
         .transaction({
             let ctx = ctx.clone();
             move |conn| {
                 verify_visibility(conn, &ctx, post_id)?;
-
-                let _: i32 = diesel::delete(post_favorite::table.find((post_id, user_id)))
-                    .returning(sql::<Integer>("0"))
-                    .get_result(conn)
-                    .optional()?
-                    .ok_or(ApiError::NotFound(ResourceType::Post))?;
-                Ok::<_, ApiError>(())
+                diesel::delete(post_favorite::table.find((post_id, user_id)))
+                    .execute(conn)
+                    .map_err(ApiError::from)
             }
         })
         .await?;
