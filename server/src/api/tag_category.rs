@@ -264,7 +264,7 @@ async fn set_default(
         .transaction(move |conn| {
             let mut category = verify_visibility(conn, &ctx, &name)?;
             let mut old_default_category: TagCategory =
-                tag_category::table.filter(TagCategory::default()).first(conn)?;
+                tag_category::table.filter(TagCategory::is_default()).first(conn)?;
 
             let defaulted_tags: Vec<i64> = diesel::update(tag::table)
                 .filter(tag::category_id.eq(category.id))
