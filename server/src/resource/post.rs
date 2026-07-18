@@ -2,7 +2,7 @@ use crate::app::Context;
 use crate::auth::Client;
 use crate::config::Config;
 use crate::content::hash::PostHash;
-use crate::get_post_stats;
+use crate::post_stats;
 use crate::model::comment::Comment;
 use crate::model::enums::{AvatarStyle, MimeType, PostFlags, PostSafety, PostType, Rating, Score};
 use crate::model::pool::PoolPost;
@@ -18,7 +18,7 @@ use crate::schema::{
     comment, comment_score, comment_statistics, pool, pool_category, pool_name, pool_statistics, post, post_favorite,
     post_note, post_relation, post_score, tag, tag_category, tag_name, tag_statistics, user,
 };
-use crate::string::{LargeString, SmallString};
+use crate::string::{LargeString, SmallString, lower};
 use crate::time::DateTime;
 use diesel::dsl::{exists, not};
 use diesel::{
@@ -239,19 +239,19 @@ impl PostInfo {
         let mut relations = f.exec(Field::Relations, || get_relations(conn, ctx, &posts))?;
         let mut pools = f.exec(Field::Pools, || get_pools(conn, &posts))?;
         let mut notes = f.exec(Field::Notes, || get_notes(conn, &posts))?;
-        let mut scores = f.exec(Field::Score, || get_post_stats!(conn, &posts, score, i64))?;
-        let mut client_scores = f.exec(Field::OwnScore, || get_client_scores(conn, ctx.client, &posts))?;
-        let mut client_favorites = f.exec(Field::OwnFavorite, || get_client_favorites(conn, ctx.client, &posts))?;
-        let mut tag_counts = f.exec(Field::TagCount, || get_post_stats!(conn, &posts, tag_count, i64))?;
-        let mut comment_counts = f.exec(Field::CommentCount, || get_post_stats!(conn, &posts, comment_count, i64))?;
-        let mut relation_counts = f.exec(Field::RelationCount, || get_post_stats!(conn, &posts, relation_count, i64))?;
-        let mut note_counts = f.exec(Field::NoteCount, || get_post_stats!(conn, &posts, note_count, i64))?;
-        let mut favorite_counts = f.exec(Field::FavoriteCount, || get_post_stats!(conn, &posts, favorite_count, i64))?;
-        let mut feature_counts = f.exec(Field::FeatureCount, || get_post_stats!(conn, &posts, feature_count, i64))?;
+        let mut scores = f.exec(Field::Score, || post_stats!(conn, &posts, score, i64))?;
+        let mut own_scores = f.exec(Field::OwnScore, || get_own_scores(conn, ctx.client, &posts))?;
+        let mut own_favorites = f.exec(Field::OwnFavorite, || get_own_favorites(conn, ctx.client, &posts))?;
+        let mut tag_counts = f.exec(Field::TagCount, || post_stats!(conn, &posts, tag_count, i64))?;
+        let mut comment_counts = f.exec(Field::CommentCount, || post_stats!(conn, &posts, comment_count, i64))?;
+        let mut relation_counts = f.exec(Field::RelationCount, || post_stats!(conn, &posts, relation_count, i64))?;
+        let mut note_counts = f.exec(Field::NoteCount, || post_stats!(conn, &posts, note_count, i64))?;
+        let mut favorite_counts = f.exec(Field::FavoriteCount, || post_stats!(conn, &posts, favorite_count, i64))?;
+        let mut feature_counts = f.exec(Field::FeatureCount, || post_stats!(conn, &posts, feature_count, i64))?;
         let mut last_feature_times =
-            f.exec(Field::LastFeatureTime, || get_post_stats!(conn, &posts, last_feature_time, Option<DateTime>))?;
-        let mut users_who_favorited =
-            f.exec(Field::FavoritedBy, || get_users_who_favorited(conn, &ctx.config, &posts))?;
+            f.exec(Field::LastFeatureTime, || post_stats!(conn, &posts, last_feature_time, Option<DateTime>))?;
+        let mut favorited_by =
+            f.exec(Field::FavoritedBy, || get_favorited_by(conn, &ctx.config, &posts))?;
 
         let mut results = posts
             .into_iter()
@@ -279,8 +279,8 @@ impl PostInfo {
                 relations: relations.pop(),
                 notes: notes.pop(),
                 score: scores.pop(),
-                own_score: client_scores.pop(),
-                own_favorite: client_favorites.pop(),
+                own_score: own_scores.pop(),
+                own_favorite: own_favorites.pop(),
                 tag_count: tag_counts.pop(),
                 favorite_count: favorite_counts.pop(),
                 comment_count: comment_counts.pop(),
@@ -288,7 +288,7 @@ impl PostInfo {
                 feature_count: feature_counts.pop(),
                 relation_count: relation_counts.pop(),
                 last_feature_time: last_feature_times.pop(),
-                favorited_by: users_who_favorited.pop(),
+                favorited_by: favorited_by.pop(),
                 comments: comments.pop(),
                 pools: pools.pop(),
                 has_custom_thumbnail: fields[Field::HasCustomThumbnail].then(|| {
@@ -319,13 +319,15 @@ fn get_owners(conn: &mut PgConnection, config: &Config, posts: &[Post]) -> Query
     post::table
         .filter(post::id.eq_any(&post_ids))
         .inner_join(user::table)
-        .select((post::id, user::name, user::avatar_style))
-        .load::<(i64, SmallString, AvatarStyle)>(conn)
+        .select((post::id, user::name, lower(user::name), user::avatar_style))
+        .load::<(_, SmallString, SmallString, _)>(conn)
         .map(|post_info| {
             resource::order_as_padded(post_info, posts, |&(id, ..)| id)
                 .into_iter()
                 .map(|post_owner| {
-                    post_owner.map(|(_, username, avatar_style)| MicroUser::new(config, username, avatar_style))
+                    post_owner.map(|(_, username, lowercase_username, avatar_style)| {
+                        MicroUser::new(config, username, &lowercase_username, avatar_style)
+                    })
                 })
                 .collect()
         })
@@ -388,16 +390,20 @@ fn get_tags(conn: &mut PgConnection, posts: &[Post]) -> QueryResult<Vec<Vec<Micr
 }
 
 fn get_comments(conn: &mut PgConnection, ctx: &Context, posts: &[Post]) -> QueryResult<Vec<Vec<CommentInfo>>> {
-    type CommentData = (Comment, i64, Option<(SmallString, AvatarStyle)>);
+    type CommentData = (Comment, i64, Option<(SmallString, SmallString, AvatarStyle)>);
     let comments: Vec<CommentData> = Comment::belonging_to(posts)
         .inner_join(comment_statistics::table)
         .left_join(user::table)
-        .select((Comment::as_select(), comment_statistics::score, (user::name, user::avatar_style).nullable()))
+        .select((
+            Comment::as_select(),
+            comment_statistics::score,
+            (user::name, lower(user::name), user::avatar_style).nullable(),
+        ))
         .order(comment::creation_time)
         .load(conn)?;
     let comment_ids: Vec<i64> = comments.iter().map(|(comment, ..)| comment.id).collect();
 
-    let client_scores: HashMap<i64, Score> = ctx
+    let own_scores: HashMap<i64, Score> = ctx
         .client
         .id
         .map(|user_id| {
@@ -424,14 +430,14 @@ fn get_comments(conn: &mut PgConnection, ctx: &Context, posts: &[Post]) -> Query
                         version: Some(comment.last_edit_time),
                         id: Some(id),
                         post_id: Some(post.id),
-                        user: Some(
-                            owner.map(|(username, avatar_style)| MicroUser::new(&ctx.config, username, avatar_style)),
-                        ),
+                        user: Some(owner.map(|(username, lowercase_username, avatar_style)| {
+                            MicroUser::new(&ctx.config, username, &lowercase_username, avatar_style)
+                        })),
                         text: Some(comment.text),
                         creation_time: Some(comment.creation_time),
                         last_edit_time: Some(comment.last_edit_time),
                         score: Some(score),
-                        own_score: Some(client_scores.get(&id).copied().map(Rating::from).unwrap_or_default()),
+                        own_score: Some(own_scores.get(&id).copied().map(Rating::from).unwrap_or_default()),
                     }
                 })
                 .collect()
@@ -520,13 +526,13 @@ fn get_notes(conn: &mut PgConnection, posts: &[Post]) -> QueryResult<Vec<Vec<Not
         .collect())
 }
 
-fn get_client_scores(conn: &mut PgConnection, client: Client, posts: &[Post]) -> QueryResult<Vec<Rating>> {
+fn get_own_scores(conn: &mut PgConnection, client: Client, posts: &[Post]) -> QueryResult<Vec<Rating>> {
     if let Some(client_id) = client.id {
         PostScore::belonging_to(posts)
             .filter(post_score::user_id.eq(client_id))
             .load::<PostScore>(conn)
-            .map(|client_scores| {
-                resource::order_as_padded(client_scores, posts, |score| score.post_id)
+            .map(|own_scores| {
+                resource::order_as_padded(own_scores, posts, |score| score.post_id)
                     .into_iter()
                     .map(|client_score| client_score.map(|score| Rating::from(score.score)).unwrap_or_default())
                     .collect()
@@ -536,13 +542,13 @@ fn get_client_scores(conn: &mut PgConnection, client: Client, posts: &[Post]) ->
     }
 }
 
-fn get_client_favorites(conn: &mut PgConnection, client: Client, posts: &[Post]) -> QueryResult<Vec<bool>> {
+fn get_own_favorites(conn: &mut PgConnection, client: Client, posts: &[Post]) -> QueryResult<Vec<bool>> {
     if let Some(client_id) = client.id {
         PostFavorite::belonging_to(posts)
             .filter(post_favorite::user_id.eq(client_id))
             .load::<PostFavorite>(conn)
-            .map(|client_favorites| {
-                resource::order_as_padded(client_favorites, posts, |favorite| favorite.post_id)
+            .map(|own_favorites| {
+                resource::order_as_padded(own_favorites, posts, |favorite| favorite.post_id)
                     .into_iter()
                     .map(|client_favorite| client_favorite.is_some())
                     .collect()
@@ -552,23 +558,21 @@ fn get_client_favorites(conn: &mut PgConnection, client: Client, posts: &[Post])
     }
 }
 
-fn get_users_who_favorited(
-    conn: &mut PgConnection,
-    config: &Config,
-    posts: &[Post],
-) -> QueryResult<Vec<Vec<MicroUser>>> {
-    let users_who_favorited: Vec<(PostFavorite, SmallString, AvatarStyle)> = PostFavorite::belonging_to(posts)
+fn get_favorited_by(conn: &mut PgConnection, config: &Config, posts: &[Post]) -> QueryResult<Vec<Vec<MicroUser>>> {
+    let favorited_by: Vec<(PostFavorite, SmallString, SmallString, _)> = PostFavorite::belonging_to(posts)
         .inner_join(user::table)
-        .select((PostFavorite::as_select(), user::name, user::avatar_style))
+        .select((PostFavorite::as_select(), user::name, lower(user::name), user::avatar_style))
         .order(user::name)
         .load(conn)?;
-    Ok(users_who_favorited
+    Ok(favorited_by
         .grouped_by(posts)
         .into_iter()
         .map(|user_favorites| {
             user_favorites
                 .into_iter()
-                .map(|(_, username, avatar_style)| MicroUser::new(config, username, avatar_style))
+                .map(|(_, username, lowercase_username, avatar_style)| {
+                    MicroUser::new(config, username, &lowercase_username, avatar_style)
+                })
                 .collect()
         })
         .collect())
@@ -576,7 +580,7 @@ fn get_users_who_favorited(
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! get_post_stats {
+macro_rules! post_stats {
     ($conn:expr, $posts:expr, $column:expr, $return_type:ty) => {{
         let post_ids: Vec<_> = $posts.iter().map(Identifiable::id).copied().collect();
         $crate::schema::post_statistics::table
