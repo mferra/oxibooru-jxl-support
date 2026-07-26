@@ -12,11 +12,12 @@ use image::error::ImageError;
 use image::{DynamicImage, ImageResult};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use strum::{Display, IntoStaticStr};
 use tokio::fs::File;
@@ -95,20 +96,26 @@ where
     S: StreamExt<Item = Result<Bytes, E>> + Unpin,
     ApiError: From<E>,
 {
+    const BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
+
+    std::fs::create_dir_all(config.path(Directory::TemporaryUploads))?;
+
     let file_name = format!("{}.zip", uuid::Uuid::new_v4());
     let archive_path = config.path(Directory::TemporaryUploads).join(file_name);
-    create_parent_directories(&archive_path)?;
 
-    let mut file = File::create(&archive_path).await?;
+    // Create a buffered writer to reduce frequency of syscalls when writing file
+    let file = File::create(&archive_path).await?;
+    let mut writer = BufWriter::with_capacity(BUFFER_CAPACITY, file);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        file.write_all(&chunk).await?;
+        writer.write_all(&chunk).await?;
     }
+    writer.flush().await?;
 
     Ok(archive_path)
 }
 
-/// Saves custom avatar `thumbnail` for user with name `username` to disk.
+/// Saves custom avatar `thumbnail` for user with lowercase name `lowercase_username` to disk.
 /// Returns size of the thumbnail in bytes.
 pub fn save_custom_avatar(config: &Config, lowercase_username: &str, thumbnail: DynamicImage) -> ImageResult<i64> {
     std::fs::create_dir_all(config.path(Directory::Avatars))?;
@@ -118,7 +125,7 @@ pub fn save_custom_avatar(config: &Config, lowercase_username: &str, thumbnail: 
     file_size(&avatar_path).map_err(ImageError::from)
 }
 
-/// Deletes custom avatar for user with name `username` from disk, if it exists.
+/// Deletes custom avatar for user with lowercase name `lowercase_username` from disk, if it exists.
 pub fn delete_custom_avatar(config: &Config, lowercase_username: &str) -> std::io::Result<()> {
     let custom_avatar_path = config.custom_avatar_path(lowercase_username);
     remove_if_exists(&custom_avatar_path)
@@ -185,20 +192,19 @@ pub fn delete_post(post: &PostHash, mime_type: MimeType) -> std::io::Result<()> 
 
 /// Renames the contents and thumbnails of two posts as if they had swapped ids.
 pub fn swap_posts(
-    config: &Config,
     post_a: &PostHash,
     mime_type_a: MimeType,
     post_b: &PostHash,
     mime_type_b: MimeType,
 ) -> std::io::Result<()> {
     // Generated thumbnails always exist; both posts share the same configured format.
-    swap_files(config, &post_a.generated_thumbnail_path(), &post_b.generated_thumbnail_path())?;
+    swap_files(&post_a.generated_thumbnail_path(), &post_b.generated_thumbnail_path())?;
 
     // Handle the four distinct cases of custom thumbnails existing/not existing
     let custom_thumbnail_path_a = post_a.custom_thumbnail_path();
     let custom_thumbnail_path_b = post_b.custom_thumbnail_path();
     match (custom_thumbnail_path_a.try_exists()?, custom_thumbnail_path_b.try_exists()?) {
-        (true, true) => swap_files(config, &custom_thumbnail_path_a, &custom_thumbnail_path_b)?,
+        (true, true) => swap_files(&custom_thumbnail_path_a, &custom_thumbnail_path_b)?,
         (true, false) => move_file(&custom_thumbnail_path_a, &custom_thumbnail_path_b)?,
         (false, true) => move_file(&custom_thumbnail_path_b, &custom_thumbnail_path_a)?,
         (false, false) => (),
@@ -208,7 +214,7 @@ pub fn swap_posts(
     let old_image_path_a = post_a.content_path(mime_type_a);
     let old_image_path_b = post_b.content_path(mime_type_b);
     if mime_type_a == mime_type_b {
-        swap_files(config, &old_image_path_a, &old_image_path_b)
+        swap_files(&old_image_path_a, &old_image_path_b)
     } else {
         move_file(&old_image_path_a, &post_b.content_path(mime_type_a))?;
         move_file(&old_image_path_b, &post_a.content_path(mime_type_b))
@@ -325,10 +331,17 @@ fn remove_stale_uploads(config: &Config, uploads: &mut HashMap<PathBuf, u64>) {
 }
 
 /// Swaps the names of two files.
-fn swap_files(config: &Config, file_a: &Path, file_b: &Path) -> std::io::Result<()> {
-    let temp_path = config
-        .path(Directory::TemporaryUploads)
-        .join(file_a.file_name().unwrap_or(OsStr::new("post.tmp")));
+fn swap_files(file_a: &Path, file_b: &Path) -> std::io::Result<()> {
+    // Monotonic counter to guarantee uniqueness across concurrent swaps
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let prefix = OsString::from(format!(".swap-{pid}-{id}-"));
+    let file_a_name = file_a.file_name().unwrap_or(OsStr::new("post"));
+    let temp_name: OsString = [&prefix, file_a_name].into_iter().collect();
+
+    let temp_path = file_a.with_file_name(temp_name);
     move_file(file_a, &temp_path)?;
     move_file(file_b, file_a)?;
     move_file(&temp_path, file_b)
