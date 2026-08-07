@@ -19,6 +19,7 @@ mod string;
 #[cfg(test)]
 mod test;
 mod time;
+mod unit;
 mod update;
 
 /// Avoid musl's default allocator due to lackluster performance
@@ -30,13 +31,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 async fn main() {
     let args = config::read_args();
-    if let Some(ffmpeg_path) = args.ffmpeg_path.clone() {
-        content::ffmpeg::set_path(ffmpeg_path);
-    }
 
     // Enable logging
     let config = config::create(args);
     app::enable_tracing(&config);
+    content::ffmpeg::configure(&config);
 
     // Read environment
     let env = config::read_env(&config).unwrap_or_else(|err| app::shutdown("Failed to read environment", err));

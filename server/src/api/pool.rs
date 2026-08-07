@@ -3,7 +3,6 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::app::AppState;
 use crate::config::Action;
 use crate::content::download;
-use crate::content::upload::MAX_UPLOAD_SIZE;
 use crate::extract::{
     Ctx, DeleteBody, Json, JsonOrMultipart, MergeBody, PageParams, PagedResponse, Path, Query, ResourceParams,
 };
@@ -27,7 +26,7 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-pub fn routes() -> OpenApiRouter<AppState> {
+pub fn routes(upload_limit: DefaultBodyLimit) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list))
         .routes(routes!(create))
@@ -36,7 +35,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(create_from_archive))
-                .route_layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
+                .route_layer(upload_limit),
         )
 }
 

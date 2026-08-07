@@ -5,6 +5,7 @@
 //! stays in the process table as a zombie for the lifetime of the server.
 
 use crate::api::error::{ApiError, ApiResult};
+use crate::config::Config;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -17,11 +18,22 @@ use tracing::error;
 const DEFAULT_PATH: &str = "/opt/app/ffmpeg";
 
 static PATH: OnceLock<PathBuf> = OnceLock::new();
+static DEFAULT_TIMEOUT_SECONDS: OnceLock<u64> = OnceLock::new();
 
-/// Overrides the `FFmpeg` binary location. Meant to be called once at startup with the value of
-/// the `--ffmpeg-path` argument; later calls are ignored.
-pub fn set_path(path: PathBuf) {
-    let _ = PATH.set(path);
+/// Applies the `FFmpeg` settings from the server configuration: the binary location given with
+/// `--ffmpeg-path`, and `limits.ffmpeg_timeout_seconds` as the default timeout. Meant to be
+/// called once at startup, before anything runs `FFmpeg`; later calls are ignored.
+pub fn configure(config: &Config) {
+    if let Some(path) = &config.args.ffmpeg_path {
+        let _ = PATH.set(path.clone());
+    }
+    let _ = DEFAULT_TIMEOUT_SECONDS.set(config.limits.ffmpeg_timeout_seconds);
+}
+
+/// Returns the configured `limits.ffmpeg_timeout_seconds`, or `fallback_seconds` if
+/// [`configure`] was never called (as in tests).
+pub fn default_timeout_seconds(fallback_seconds: u64) -> u64 {
+    DEFAULT_TIMEOUT_SECONDS.get().copied().unwrap_or(fallback_seconds)
 }
 
 /// Returns the `FFmpeg` binary to run.

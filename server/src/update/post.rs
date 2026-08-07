@@ -398,7 +398,7 @@ pub fn convert_to_jxl(config: &Config, conn: &mut PgConnection, post_id: i64) ->
         return Err(ApiError::JxlConversionUnsupported(mime_type));
     }
 
-    let decoded = decode::image(&old_content_path, mime_type)?;
+    let decoded = decode::image(config, &old_content_path, mime_type)?;
     let jxl_bytes = encode::to_jxl(&decoded, config.transcoding.image_quality)?;
 
     let new_content_path = post_hash.content_path(MimeType::Jxl);

@@ -250,7 +250,7 @@ fn recompute_post_type_in_parallel(
     let post_type = if is_animated_webp {
         PostType::Animation
     } else {
-        match decode::detect_post_type(&content_path, mime_type) {
+        match decode::detect_post_type(&state.config, &content_path, mime_type) {
             Ok(post_type) => post_type,
             Err(err) => {
                 error!("Cannot detect post type for post {post_id} for reason: {err}");
@@ -530,7 +530,7 @@ fn convert_post_to_jxl_in_parallel(
         .unwrap_or(0);
 
     // Decode the original file.
-    let decoded = match decode::image(&old_content_path, mime_type) {
+    let decoded = match decode::image(&state.config, &old_content_path, mime_type) {
         Ok(img) => img,
         Err(err) => {
             error!(
@@ -941,7 +941,7 @@ fn merge_pair_if_duplicate(
 
     let merge_to_path = PostHash::new(&state.config, merge_to_id, None).content_path(merge_to.mime_type);
     let absorbed_path = PostHash::new(&state.config, absorbed_id, None).content_path(absorbed.mime_type);
-    let merge_to_image = match decode::image(&merge_to_path, merge_to.mime_type) {
+    let merge_to_image = match decode::image(&state.config, &merge_to_path, merge_to.mime_type) {
         Ok(image) => image,
         Err(err) => {
             error!("Cannot decode content for post {merge_to_id} from {}: {err}", merge_to_path.display());
@@ -949,7 +949,7 @@ fn merge_pair_if_duplicate(
             return;
         }
     };
-    let absorbed_image = match decode::image(&absorbed_path, absorbed.mime_type) {
+    let absorbed_image = match decode::image(&state.config, &absorbed_path, absorbed.mime_type) {
         Ok(image) => image,
         Err(err) => {
             error!("Cannot decode content for post {absorbed_id} from {}: {err}", absorbed_path.display());
@@ -1018,8 +1018,8 @@ fn decode_generated_thumbnail(state: &AppState, post_id: i64) -> ApiResult<Dynam
         ThumbnailFormat::Jpeg => (("jpg", MimeType::Jpeg), ("jxl", MimeType::Jxl)),
         ThumbnailFormat::Jxl => (("jxl", MimeType::Jxl), ("jpg", MimeType::Jpeg)),
     };
-    decode::image(&post_hash.generated_thumbnail_path_with_ext(first.0), first.1)
-        .or_else(|_| decode::image(&post_hash.generated_thumbnail_path_with_ext(second.0), second.1))
+    decode::image(&state.config, &post_hash.generated_thumbnail_path_with_ext(first.0), first.1)
+        .or_else(|_| decode::image(&state.config, &post_hash.generated_thumbnail_path_with_ext(second.0), second.1))
 }
 
 /// Number of post IDs per bulk metadata query.

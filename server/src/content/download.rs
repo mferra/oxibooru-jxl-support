@@ -1,7 +1,7 @@
 use crate::api::error::{ApiError, ApiResult};
 use crate::app::Context;
-use crate::config::Action;
-use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
+use crate::config::{Action, Config};
+use crate::content::upload::UploadToken;
 use crate::filesystem;
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt};
@@ -15,16 +15,6 @@ use url::Url;
 
 // Some websites expect a user-agent
 const FAKE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0";
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Bounds the number of HTTP requests made for a single `from_url` call. Covers both
-/// redirect hops and the one-time retry-with-Referer, so it's intentionally a bit
-/// higher than a typical max-redirects value.
-const MAX_ATTEMPTS: u8 = 8;
-
-const MAX_DOWNLOAD_SIZE: u64 = MAX_UPLOAD_SIZE as u64;
 
 fn forbidden_url(message: &'static str) -> ApiError {
     Box::<dyn std::error::Error + Send + Sync>::from(message).into()
@@ -112,13 +102,13 @@ async fn resolve_target(url: &Url, allow_private: bool) -> ApiResult<(String, So
 
 /// Builds a client pinned to `addr` for `host`, with redirects disabled so the caller
 /// can validate each redirect target before following it.
-fn build_client(host: &str, addr: SocketAddr, headers: HeaderMap) -> ApiResult<Client> {
+fn build_client(config: &Config, host: &str, addr: SocketAddr, headers: HeaderMap) -> ApiResult<Client> {
     Client::builder()
         .user_agent(FAKE_USER_AGENT)
         .default_headers(headers)
         .redirect(Policy::none())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(Duration::from_secs(config.limits.download_connect_timeout_seconds))
+        .timeout(Duration::from_mins(config.limits.download_timeout_minutes))
         .resolve(host, addr)
         .build()
         .map_err(ApiError::from)
@@ -126,10 +116,13 @@ fn build_client(host: &str, addr: SocketAddr, headers: HeaderMap) -> ApiResult<C
 
 /// Fetches `url`, following redirects manually so each target can be validated.
 /// `allow_private` permits targets in private address ranges (e.g. a LAN file server).
-async fn fetch_response(mut url: Url, allow_private: bool) -> ApiResult<Response> {
+async fn fetch_response(config: &Config, mut url: Url, allow_private: bool) -> ApiResult<Response> {
+    // Every redirect hop is a request, plus the initial one and the one-time retry with a Referer.
+    let max_attempts = config.limits.max_download_redirects + 2;
+
     let mut add_referer = false;
     let mut response = None;
-    for _ in 0..MAX_ATTEMPTS {
+    for _ in 0..max_attempts {
         if !matches!(url.scheme(), "http" | "https") {
             return Err(forbidden_url("Only http and https URLs are allowed"));
         }
@@ -142,7 +135,7 @@ async fn fetch_response(mut url: Url, allow_private: bool) -> ApiResult<Response
             headers.insert(REFERER, HeaderValue::from_str(url.as_str())?);
         }
 
-        let client = build_client(&host, addr, headers)?;
+        let client = build_client(config, &host, addr, headers)?;
         let candidate = client.get(url.clone()).send().await?;
 
         if candidate.status() == StatusCode::FORBIDDEN && !add_referer {
@@ -167,9 +160,9 @@ async fn fetch_response(mut url: Url, allow_private: bool) -> ApiResult<Response
     response.ok_or_else(|| forbidden_url("Too many redirects"))
 }
 
-/// Enforces [`MAX_DOWNLOAD_SIZE`] on `response` and returns its limited byte stream.
-fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<Bytes>> + Unpin> {
-    if response.content_length().is_some_and(|len| len > MAX_DOWNLOAD_SIZE) {
+/// Enforces `max_size` (in bytes) on `response` and returns its limited byte stream.
+fn limited_stream(response: Response, max_size: u64) -> ApiResult<impl Stream<Item = ApiResult<Bytes>> + Unpin> {
+    if response.content_length().is_some_and(|len| len > max_size) {
         return Err(forbidden_url("Content exceeds maximum allowed download size"));
     }
 
@@ -177,7 +170,7 @@ fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<
     Ok(response.bytes_stream().map(move |chunk_result| {
         let chunk = chunk_result?;
         downloaded += chunk.len() as u64;
-        if downloaded > MAX_DOWNLOAD_SIZE {
+        if downloaded > max_size {
             return Err(forbidden_url("Content exceeds maximum allowed download size"));
         }
         Ok(chunk)
@@ -190,8 +183,8 @@ fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<
 pub async fn from_url(ctx: &Context, url: Url) -> ApiResult<UploadToken> {
     ctx.verify_privilege(Action::UploadUseDownloader)?;
 
-    let response = fetch_response(url, false).await?;
-    let stream = limited_stream(response)?;
+    let response = fetch_response(&ctx.config, url, false).await?;
+    let stream = limited_stream(response, ctx.config.limits.max_upload_size.as_u64())?;
     filesystem::save_uploaded_file(&ctx.config, stream).await
 }
 
@@ -202,8 +195,8 @@ pub async fn from_url(ctx: &Context, url: Url) -> ApiResult<UploadToken> {
 pub async fn archive_from_url(ctx: &Context, url: Url) -> ApiResult<PathBuf> {
     ctx.verify_privilege(Action::UploadUseDownloader)?;
 
-    let response = fetch_response(url, ctx.config.allow_lan_archive_downloads).await?;
-    let stream = limited_stream(response)?;
+    let response = fetch_response(&ctx.config, url, ctx.config.allow_lan_archive_downloads).await?;
+    let stream = limited_stream(response, ctx.config.limits.max_upload_size.as_u64())?;
     filesystem::save_uploaded_archive(&ctx.config, stream).await
 }
 

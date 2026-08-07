@@ -4,7 +4,7 @@ use crate::content::cache;
 use crate::content::hash::PostHash;
 use crate::content::signature::{self, SignatureCache};
 use crate::content::thumbnail::ThumbnailCategory;
-use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
+use crate::content::upload::UploadToken;
 use crate::model::enums::{MimeType, PostSafety, PostType};
 use crate::model::pool::{NewPool, Pool};
 use crate::model::post::{NewPost, NewPostSignature, Post, PostSignature};
@@ -82,7 +82,7 @@ pub fn import_archive_as_pool(
             info!("Skipping {name}: not a still image");
             continue;
         }
-        if entry.size() > MAX_UPLOAD_SIZE as u64 {
+        if entry.size() > context.config.limits.max_upload_size.as_u64() {
             return Err(import_error(format!("Archive entry {name} is larger than the upload size limit")));
         }
         pages.push((index, name, mime_type));

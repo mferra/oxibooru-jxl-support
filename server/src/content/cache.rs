@@ -95,7 +95,7 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
     let post_type = if is_animated_webp {
         PostType::Animation
     } else {
-        decode::detect_post_type(&temp_path, mime_type)?
+        decode::detect_post_type(&ctx.config, &temp_path, mime_type)?
     };
 
     let has_sound = match post_type {

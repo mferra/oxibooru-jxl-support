@@ -21,7 +21,7 @@ pub fn infer_mime_type(prefix: &[u8]) -> ApiResult<MimeType> {
 }
 
 /// Decodes a JPEG XL file at `file_path` using jxl-oxide.
-fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {
+fn decode_jxl(config: &Config, file_path: &Path) -> ApiResult<DynamicImage> {
     let jxl = jxl_oxide::JxlImage::builder()
         .open(file_path)
         .map_err(|e| ApiError::FfmpegError(e.to_string().into()))?;
@@ -34,7 +34,7 @@ fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {
     // single large file can exhaust memory: rendering produces one f32 plane per channel
     // before any of it is narrowed to 8 bits, so the peak is several times the size of the
     // image this function returns.
-    let limits = image_reader_limits();
+    let limits = image_reader_limits(config);
     if limits.max_image_width.is_some_and(|max| width > max) || limits.max_image_height.is_some_and(|max| height > max)
     {
         let message = format!("JXL is {width}x{height}, which exceeds the maximum decodable dimensions");
@@ -91,7 +91,7 @@ fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {
 /// For Flash media, it is the largest image that can be decoded from the Flash tags.
 pub fn representative_image(config: &Config, file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
     match PostType::from(mime_type) {
-        PostType::Image | PostType::Animation => image(file_path, mime_type),
+        PostType::Image | PostType::Animation => image(config, file_path, mime_type),
         PostType::Video => ffmpeg_frame(file_path, PostType::Video).and_then(|frame| frame.ok_or(ApiError::EmptyVideo)),
         PostType::Flash => flash_image(config, file_path).and_then(|frame| frame.ok_or(ApiError::EmptySwf)),
     }
@@ -156,16 +156,16 @@ pub fn swf_has_audio(path: &Path) -> ApiResult<bool> {
 }
 
 /// Decodes a raw array of bytes into pixel data.
-pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
+pub fn image(config: &Config, file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
     if mime_type == MimeType::Jxl {
-        return decode_jxl(file_path);
+        return decode_jxl(config, file_path);
     }
     if let Some(format) = mime_type.to_image_format() {
         let file = content::map_read_result(File::open(file_path))?;
 
         let mut reader = ImageReader::new(BufReader::new(file));
         reader.set_format(format);
-        reader.limits(image_reader_limits());
+        reader.limits(image_reader_limits(config));
         reader.decode().map_err(ApiError::from)
     } else {
         ffmpeg_frame(file_path, PostType::Image)?
@@ -173,13 +173,14 @@ pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
     }
 }
 
-/// Wall-clock limit for a single `FFmpeg` invocation, overridable with the `FFMPEG_TIMEOUT`
-/// environment variable (in seconds).
+/// Wall-clock limit for a single `FFmpeg` invocation: `limits.ffmpeg_timeout_seconds` from the
+/// config, overridable with the `FFMPEG_TIMEOUT` environment variable (in seconds).
 ///
 /// `FFmpeg` has no timeout of its own, and a truncated or malformed file can leave it spinning
 /// or blocked forever. Without a limit, one bad post wedges whichever worker thread picked it
 /// up for the rest of an admin task, and enough of them stall the task completely.
-static FFMPEG_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| ffmpeg::env_timeout("FFMPEG_TIMEOUT", 120));
+static FFMPEG_TIMEOUT: LazyLock<Duration> =
+    LazyLock::new(|| ffmpeg::env_timeout("FFMPEG_TIMEOUT", ffmpeg::default_timeout_seconds(120)));
 
 /// Decodes a representative frame of the image or video at the given `path`.
 ///
@@ -334,10 +335,10 @@ fn flash_image(config: &Config, path: &Path) -> ApiResult<Option<DynamicImage>> 
 /// Returns the post type based on file content for formats where [`PostType::from`] can be
 /// wrong: not every GIF is animated, and some AVIF are. For everything else, this just
 /// defers to the mime type.
-pub fn detect_post_type(file_path: &Path, mime_type: MimeType) -> ApiResult<PostType> {
+pub fn detect_post_type(config: &Config, file_path: &Path, mime_type: MimeType) -> ApiResult<PostType> {
     let is_animated = match mime_type {
         MimeType::Avif => Some(avif_is_animated(file_path)),
-        MimeType::Gif => Some(gif_is_animated(file_path)?),
+        MimeType::Gif => Some(gif_is_animated(config, file_path)?),
         _ => None,
     };
     Ok(match is_animated {
@@ -348,10 +349,10 @@ pub fn detect_post_type(file_path: &Path, mime_type: MimeType) -> ApiResult<Post
 }
 
 /// Returns `true` if the GIF at `path` has more than one frame.
-fn gif_is_animated(path: &Path) -> ApiResult<bool> {
+fn gif_is_animated(config: &Config, path: &Path) -> ApiResult<bool> {
     let file = content::map_read_result(File::open(path))?;
     let mut decoder = GifDecoder::new(BufReader::new(file))?;
-    decoder.set_limits(image_reader_limits())?;
+    decoder.set_limits(image_reader_limits(config))?;
 
     // GIF doesn't store a frame count, so just check for a second frame.
     let mut frames = decoder.into_frames();
@@ -416,13 +417,11 @@ fn avif_is_animated(path: &Path) -> bool {
 }
 
 /// Returns maximum decoded image size.
-fn image_reader_limits() -> Limits {
-    const MB: u64 = 1024_u64.pow(2);
-
+fn image_reader_limits(config: &Config) -> Limits {
     let mut limits = Limits::no_limits();
-    limits.max_alloc = Some(256 * MB);
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(config.limits.max_image_allocation.as_u64());
+    limits.max_image_width = Some(config.limits.max_image_width);
+    limits.max_image_height = Some(config.limits.max_image_height);
     limits
 }
 
