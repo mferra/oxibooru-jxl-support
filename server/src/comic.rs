@@ -82,7 +82,7 @@ pub fn import_archive_as_pool(
             info!("Skipping {name}: not a still image");
             continue;
         }
-        if entry.size() > context.config.limits.max_upload_size.as_u64() {
+        if entry.size() > u64::try_from(context.config.limits.max_upload_size).unwrap_or(u64::MAX) {
             return Err(import_error(format!("Archive entry {name} is larger than the upload size limit")));
         }
         pages.push((index, name, mime_type));

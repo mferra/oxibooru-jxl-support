@@ -184,7 +184,7 @@ pub async fn from_url(ctx: &Context, url: Url) -> ApiResult<UploadToken> {
     ctx.verify_privilege(Action::UploadUseDownloader)?;
 
     let response = fetch_response(&ctx.config, url, false).await?;
-    let stream = limited_stream(response, ctx.config.limits.max_upload_size.as_u64())?;
+    let stream = limited_stream(response, u64::try_from(ctx.config.limits.max_upload_size).unwrap_or(u64::MAX))?;
     filesystem::save_uploaded_file(&ctx.config, stream).await
 }
 
@@ -196,7 +196,7 @@ pub async fn archive_from_url(ctx: &Context, url: Url) -> ApiResult<PathBuf> {
     ctx.verify_privilege(Action::UploadUseDownloader)?;
 
     let response = fetch_response(&ctx.config, url, ctx.config.allow_lan_archive_downloads).await?;
-    let stream = limited_stream(response, ctx.config.limits.max_upload_size.as_u64())?;
+    let stream = limited_stream(response, u64::try_from(ctx.config.limits.max_upload_size).unwrap_or(u64::MAX))?;
     filesystem::save_uploaded_archive(&ctx.config, stream).await
 }
 
