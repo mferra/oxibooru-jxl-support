@@ -292,7 +292,7 @@ fn import_page(
 
         let post_data = snapshot::post::SnapshotData {
             safety: new_post.safety,
-            checksum: hex::encode(&new_post.checksum),
+            checksum: new_post.checksum,
             flags: new_post.flags,
             source: new_post.source,
             description: new_post.description,
