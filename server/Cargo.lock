@@ -2427,7 +2427,6 @@ dependencies = [
  "axum-test",
  "base64 0.22.1",
  "blake3",
- "byteorder",
  "compact_str",
  "config",
  "diesel",
