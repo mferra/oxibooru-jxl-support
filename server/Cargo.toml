@@ -57,6 +57,9 @@ uuid = { version = "1.13.1", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
+[patch.crates-io]
+infer = { git = "https://github.com/liamw1/infer" }
+
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = "0.1.48"
 
