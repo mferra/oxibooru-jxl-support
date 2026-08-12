@@ -161,12 +161,22 @@ pub fn image(config: &Config, file_path: &Path, mime_type: MimeType) -> ApiResul
         return decode_jxl(config, file_path);
     }
     if let Some(format) = mime_type.to_image_format() {
-        let file = content::map_read_result(File::open(file_path))?;
-
-        let mut reader = ImageReader::new(BufReader::new(file));
+        let mut reader = content::map_read_result(File::open(file_path))
+            .map(BufReader::new)
+            .map(ImageReader::new)?;
         reader.set_format(format);
         reader.limits(image_reader_limits(config));
-        reader.decode().map_err(ApiError::from)
+
+        // Browsers honour EXIF orientation when displaying the original file, so the decoded
+        // pixels have to be rotated to match. Otherwise thumbnails come out sideways, and
+        // anything re-encoded from them (JXL conversion, transcoding) loses the orientation
+        // for good, since the EXIF block is not carried over.
+        let mut decoder = reader.into_decoder()?;
+        let orientation = decoder.orientation()?;
+
+        let mut image = DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        Ok(image)
     } else {
         ffmpeg_frame(file_path, PostType::Image)?
             .ok_or(ApiError::FfmpegError(format!("Unable to decode {mime_type} image with FFmpeg").into()))
