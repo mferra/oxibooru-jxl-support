@@ -28,7 +28,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::{debug, error, info, warn};
+use tracing::{Level, debug, error, info, warn};
 
 /// Checks the integrity of all posts on the filesystem by comparing the stored
 /// checksum with the checksum of the post content in its current state.
@@ -38,13 +38,12 @@ pub fn check_integrity(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("check_integrity");
-        let progress = ProgressReporter::new("Posts checked", PRINT_INTERVAL);
-        let failures = ProgressReporter::new("Integrity checks failed", None);
+        let progress = ProgressReporter::new(Level::INFO, "Posts checked", PRINT_INTERVAL);
+        let failures = ProgressReporter::new(Level::WARN, "Integrity checks failed", None);
         let metadata = post_checksums(state, &post_ids)?;
         metadata.into_par_iter().try_for_each(|(post_id, mime_type, checksum)| {
             check_integrity_in_parallel(state, post_id, mime_type, &checksum, &progress, &failures)
         })?;
-        failures.report();
         Ok(())
     });
 }
@@ -56,13 +55,12 @@ pub fn recompute_checksums(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("recompute_checksums");
-        let progress = ProgressReporter::new("Checksums computed", PRINT_INTERVAL);
-        let duplicate_count = ProgressReporter::new("Duplicates found", PRINT_INTERVAL);
+        let progress = ProgressReporter::new(Level::INFO, "Checksums computed", PRINT_INTERVAL);
+        let duplicate_count = ProgressReporter::new(Level::WARN, "Duplicates found", PRINT_INTERVAL);
         let metadata = post_mime_types(state, &post_ids)?;
         metadata.into_par_iter().try_for_each(|(post_id, mime_type)| {
             recompute_checksum_in_parallel(state, post_id, mime_type, &progress, &duplicate_count)
         })?;
-        duplicate_count.report();
         Ok(())
     });
 }
@@ -81,7 +79,7 @@ pub fn recompute_signatures(state: &AppState, editor: &mut PostEditor) {
             .execute(&mut state.connection_pool.get_blocking()?)?;
 
         let _timer = Timer::new("recompute_signatures");
-        let progress = ProgressReporter::new("Signatures computed", PRINT_INTERVAL);
+        let progress = ProgressReporter::new(Level::INFO, "Signatures computed", PRINT_INTERVAL);
         let metadata = post_mime_types(state, &post_ids)?;
         metadata
             .into_par_iter()
@@ -99,7 +97,7 @@ pub fn recompute_indexes(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("recompute_indexes");
-        let progress = ProgressReporter::new("Indexes computed", PRINT_INTERVAL);
+        let progress = ProgressReporter::new(Level::INFO, "Indexes computed", PRINT_INTERVAL);
         post_ids
             .into_par_iter()
             .try_for_each(|post_id| recompute_index_in_parallel(state, post_id, &progress))
@@ -114,7 +112,7 @@ pub fn recompute_post_types(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("recompute_post_types");
-        let progress = ProgressReporter::new("Post types computed", PRINT_INTERVAL);
+        let progress = ProgressReporter::new(Level::INFO, "Post types computed", PRINT_INTERVAL);
         let metadata = post_mime_types(state, &post_ids)?;
         metadata
             .into_par_iter()
@@ -146,9 +144,9 @@ fn regenerate_thumbnails_impl(state: &AppState, editor: &mut PostEditor, force: 
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("regenerate_thumbnails");
-        let progress = ProgressReporter::new("Thumbnails regenerated", PRINT_INTERVAL);
-        let skipped = ProgressReporter::new("Posts skipped (thumbnail already in configured format)", None);
-        let failed = ProgressReporter::new("Posts skipped (content could not be decoded)", None);
+        let progress = ProgressReporter::new(Level::INFO, "Thumbnails regenerated", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new(Level::INFO, "Posts skipped (thumbnail already in configured format)", None);
+        let failed = ProgressReporter::new(Level::INFO, "Posts skipped (content could not be decoded)", None);
         let metadata = thumbnail_metadata(state, &post_ids)?;
         metadata.into_par_iter().try_for_each(|(post_id, mime_type, thumbnail_size)| {
             regenerate_thumbnail_in_parallel(
@@ -162,8 +160,6 @@ fn regenerate_thumbnails_impl(state: &AppState, editor: &mut PostEditor, force: 
                 &failed,
             )
         })?;
-        skipped.report();
-        failed.report();
         Ok(())
     });
 }
@@ -465,15 +461,13 @@ pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("convert_posts_to_jxl");
-        let converted = ProgressReporter::new("Posts converted to JXL", PRINT_INTERVAL);
-        let skipped = ProgressReporter::new("Posts skipped", None);
-        let failed = ProgressReporter::new("Posts failed", None);
+        let converted = ProgressReporter::new(Level::INFO, "Posts converted to JXL", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new(Level::INFO, "Posts skipped", None);
+        let failed = ProgressReporter::new(Level::WARN, "Posts failed", None);
         let metadata = post_phashes(state, &post_ids)?;
         metadata.into_par_iter().try_for_each(|(post_id, mime_type, existing_phash)| {
             convert_post_to_jxl_in_parallel(state, post_id, mime_type, existing_phash, &converted, &skipped, &failed)
         })?;
-        skipped.report();
-        failed.report();
         Ok(())
     });
 }
@@ -723,8 +717,8 @@ fn compute_phash_impl(state: &AppState, editor: &mut PostEditor, force: bool) {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("compute_phash");
-        let progress = ProgressReporter::new("pHash computed", PRINT_INTERVAL);
-        let skipped = ProgressReporter::new("Posts skipped (pHash already set)", None);
+        let progress = ProgressReporter::new(Level::INFO, "pHash computed", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new(Level::INFO, "Posts skipped (pHash already set)", None);
         let targets = if force {
             post_mime_types(state, &post_ids)?
         } else {
@@ -738,7 +732,6 @@ fn compute_phash_impl(state: &AppState, editor: &mut PostEditor, force: bool) {
         for (post_id, mime_type) in targets {
             compute_phash_for_post(state, post_id, mime_type, &progress)?;
         }
-        skipped.report();
         Ok(())
     });
 }
@@ -852,9 +845,9 @@ pub fn merge_duplicate_posts(state: &AppState, editor: &mut PostEditor) {
         let selected: HashSet<i64> = post_ids.into_iter().collect();
 
         let _timer = Timer::new("merge_duplicate_posts");
-        let merged = ProgressReporter::new("Duplicate pairs merged", PRINT_INTERVAL);
-        let skipped = ProgressReporter::new("Related pairs skipped (not pixel-identical duplicates)", None);
-        let failed = ProgressReporter::new("Merges failed", None);
+        let merged = ProgressReporter::new(Level::INFO, "Duplicate pairs merged", PRINT_INTERVAL);
+        let skipped = ProgressReporter::new(Level::INFO, "Related pairs skipped (not pixel-identical duplicates)", None);
+        let failed = ProgressReporter::new(Level::WARN, "Merges failed", None);
 
         // Relations are stored bidirectionally; parent_id < child_id picks each pair once.
         let pairs: Vec<(i64, i64)> = post_relation::table
@@ -873,9 +866,6 @@ pub fn merge_duplicate_posts(state: &AppState, editor: &mut PostEditor) {
             merge_pair_if_duplicate(state, merge_to_id, absorbed_id, &merged, &skipped, &failed);
         }
 
-        merged.report();
-        skipped.report();
-        failed.report();
         if !state.config.delete_source_files {
             info!(
                 "delete_source_files is disabled, so absorbed posts' files were left on disk. \
