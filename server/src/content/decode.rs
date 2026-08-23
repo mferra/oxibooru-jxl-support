@@ -8,8 +8,16 @@ use image::{DynamicImage, ImageFormat, ImageReader, Limits, RgbImage, RgbaImage}
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::str::FromStr;
 use swf::Tag;
 use tracing::error;
+
+/// Infers a [`MimeType`] from the magic bytes at the start of a file's contents,
+/// rather than trusting a client-supplied extension or `Content-Type` header.
+pub fn infer_mime_type(prefix: &[u8]) -> ApiResult<MimeType> {
+    let kind = infer::get(prefix).ok_or(ApiError::MissingContentType)?;
+    MimeType::from_str(kind.mime_type()).map_err(Box::from).map_err(ApiError::from)
+}
 
 /// Decodes a JPEG XL file at `file_path` using jxl-oxide.
 fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {

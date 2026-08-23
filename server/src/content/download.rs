@@ -2,15 +2,13 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::config::Config;
 use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
 use crate::filesystem;
-use crate::model::enums::MimeType;
 use axum::body::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION, REFERER};
+use reqwest::header::{HeaderMap, HeaderValue, LOCATION, REFERER};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
@@ -190,16 +188,8 @@ fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<
 /// and a content token is returned.
 pub async fn from_url(config: &Config, url: Url) -> ApiResult<UploadToken> {
     let response = fetch_response(url, false).await?;
-
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .map(|header_value| header_value.to_str())
-        .transpose()?;
-    let mime_type = MimeType::from_str(content_type.unwrap_or("")).map_err(Box::from)?;
-
     let stream = limited_stream(response)?;
-    filesystem::save_uploaded_file(config, stream, mime_type).await
+    filesystem::save_uploaded_file(config, stream).await
 }
 
 /// Downloads an archive (e.g. a CBZ) from `url` into the temporary uploads

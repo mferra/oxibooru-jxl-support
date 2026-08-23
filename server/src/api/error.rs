@@ -21,8 +21,6 @@ pub type ApiResult<T> = Result<T, ApiError>;
 pub enum ApiError {
     #[error("{0} already exists")]
     AlreadyExists(ResourceProperty),
-    #[error("File of type {0} did not match request with content-type '{1}'")]
-    ContentTypeMismatch(MimeType, SmallString),
     #[error("Cyclic dependency detected in {0}s")]
     CyclicDependency(ResourceType),
     #[error("Cannot delete default {0}")]
@@ -64,7 +62,7 @@ pub enum ApiError {
     JsonSerialization(#[from] serde_json::Error),
     #[error("Missing {0} content")]
     MissingContent(ResourceType),
-    #[error("Form is missing content-type")]
+    #[error("Failed to determine content type")]
     MissingContentType,
     #[error("Missing form data")]
     MissingFormData,
@@ -111,8 +109,7 @@ impl ApiError {
             Self::PathRejection(err) => err.status(),
             Self::Request(err) => err.status().unwrap_or(StatusCode::BAD_REQUEST),
             Self::QueryRejection(err) => err.status(),
-            Self::ContentTypeMismatch(..)
-            | Self::HeaderDeserialization(_)
+            Self::HeaderDeserialization(_)
             | Self::MissingContent(_)
             | Self::MissingContentType
             | Self::MissingFormData
@@ -165,7 +162,6 @@ impl ApiError {
     fn category(&self) -> &'static str {
         match self {
             Self::AlreadyExists(_) => "Already Exists",
-            Self::ContentTypeMismatch(..) => "Content Type Mismatch",
             Self::CyclicDependency(_) => "Cyclic Dependency",
             Self::DeleteDefault(_) => "Delete Default",
             Self::EmptySwf => "Empty SWF",

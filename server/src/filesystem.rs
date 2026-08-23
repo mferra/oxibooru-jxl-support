@@ -1,5 +1,6 @@
 use crate::api::error::{ApiError, ApiResult};
 use crate::config::{Config, ThumbnailFormat};
+use crate::content::decode;
 use crate::content::encode;
 use crate::content::hash::PostHash;
 use crate::content::thumbnail::ThumbnailCategory;
@@ -38,21 +39,34 @@ pub fn file_size(path: &Path) -> std::io::Result<i64> {
         .map(|metadata| i64::try_from(metadata.len()).expect("File size must be less than i64::MAX"))
 }
 
-/// Saves streamed file contents to the temporary uploads folder as a `mime_type` file.
+/// Saves streamed file contents to the temporary uploads folder, inferring the MIME
+/// type from the content's magic bytes rather than trusting caller-supplied metadata.
 /// Returns the name of the file written.
 ///
 /// Does not perform cleanup on error. It instead relies on the cleanup task spawned from
 /// `spawn_temporary_uploads_cleanup_task` to clean out failed uploads.
-pub async fn save_uploaded_file<S, E>(config: &Config, mut stream: S, mime_type: MimeType) -> ApiResult<UploadToken>
+pub async fn save_uploaded_file<S, E>(config: &Config, mut stream: S) -> ApiResult<UploadToken>
 where
     S: StreamExt<Item = Result<Bytes, E>> + Unpin,
     ApiError: From<E>,
 {
+    const SNIFF_LEN: usize = 512;
+
+    // Buffer enough of the stream to infer the MIME type from its magic bytes.
+    let mut prefix = Vec::with_capacity(SNIFF_LEN);
+    while prefix.len() < SNIFF_LEN
+        && let Some(chunk) = stream.next().await
+    {
+        prefix.extend_from_slice(&chunk?);
+    }
+    let mime_type = decode::infer_mime_type(&prefix)?;
+
     let upload_token = UploadToken::new(mime_type);
     let upload_path = upload_token.path(config);
     create_parent_directories(&upload_path)?;
 
     let mut file = File::create(upload_path).await?;
+    file.write_all(&prefix).await?;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
