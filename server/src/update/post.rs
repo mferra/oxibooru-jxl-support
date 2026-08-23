@@ -32,13 +32,13 @@ pub fn last_edit_time(conn: &mut PgConnection, post_id: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// Updates thumbnail for post.
+/// Updates thumbnail for post. Returns the size in bytes of the saved thumbnail.
 pub fn thumbnail(
     conn: &mut PgConnection,
     post_hash: &PostHash,
     thumbnail: &DynamicImage,
     thumbnail_type: ThumbnailCategory,
-) -> ApiResult<()> {
+) -> ApiResult<i64> {
     filesystem::delete_post_thumbnail(post_hash, thumbnail_type)?;
     let thumbnail_size = filesystem::save_post_thumbnail(post_hash, thumbnail, thumbnail_type)?;
     match thumbnail_type {
@@ -49,6 +49,15 @@ pub fn thumbnail(
             .set(post::custom_thumbnail_size.eq(thumbnail_size))
             .execute(conn)?,
     };
+    Ok(thumbnail_size)
+}
+
+/// Removes the custom thumbnail for post, reverting it to the generated thumbnail.
+pub fn remove_custom_thumbnail(conn: &mut PgConnection, post_hash: &PostHash) -> ApiResult<()> {
+    filesystem::delete_post_thumbnail(post_hash, ThumbnailCategory::Custom)?;
+    diesel::update(post::table.find(post_hash.id()))
+        .set(post::custom_thumbnail_size.eq(0))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -362,7 +371,8 @@ pub fn regenerate_thumbnail(config: &Config, conn: &mut PgConnection, post_id: i
     let content_path = post_hash.content_path(mime_type);
     let image = decode::representative_image(config, &content_path, mime_type)?;
     let thumb = thumbnail::create(config, &image, ThumbnailType::Post);
-    thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated)
+    thumbnail(conn, &post_hash, &thumb, ThumbnailCategory::Generated)?;
+    Ok(())
 }
 
 /// Converts a post's image content to JPEG XL in-place, updating mime_type, checksums,

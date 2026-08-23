@@ -957,7 +957,8 @@ async fn update_impl(
     };
 
     let Ctx(ctx, connection_pool) = ctx;
-    let custom_thumbnail = match Content::new(body.thumbnail_token, body.thumbnail_url) {
+    let remove_custom_thumbnail = body.thumbnail_token.as_ref().is_some_and(Option::is_none);
+    let custom_thumbnail = match Content::new(body.thumbnail_token.flatten(), body.thumbnail_url) {
         Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Post).await?),
         None => None,
     };
@@ -1059,11 +1060,16 @@ async fn update_impl(
                 filesystem::move_file(&temp_path, &post_hash.content_path(content_properties.mime_type))?;
 
                 // Replace generated thumbnail
-                update::post::thumbnail(conn, &post_hash, &content_properties.thumbnail, ThumbnailCategory::Generated)?;
+                new_post.generated_thumbnail_size =
+                    update::post::thumbnail(conn, &post_hash, &content_properties.thumbnail, ThumbnailCategory::Generated)?;
             }
             if let Some(thumbnail) = custom_thumbnail {
                 ctx.verify_privilege(Action::PostEditThumbnail)?;
-                update::post::thumbnail(conn, &post_hash, &thumbnail, ThumbnailCategory::Custom)?;
+                new_post.custom_thumbnail_size = update::post::thumbnail(conn, &post_hash, &thumbnail, ThumbnailCategory::Custom)?;
+            } else if remove_custom_thumbnail {
+                ctx.verify_privilege(Action::PostEditThumbnail)?;
+                update::post::remove_custom_thumbnail(conn, &post_hash)?;
+                new_post.custom_thumbnail_size = 0;
             }
 
             new_post.last_edit_time = DateTime::now();
@@ -1104,9 +1110,10 @@ struct PostUpdateBody {
     content_token: Option<UploadToken>,
     /// URL to fetch content from.
     content_url: Option<Url>,
-    /// Token referencing previously uploaded thumbnail.
+    /// Token referencing previously uploaded custom thumbnail. Set to null to remove.
     #[schema(value_type = Option<String>)]
-    thumbnail_token: Option<UploadToken>,
+    #[serde(default, deserialize_with = "api::deserialize_some")]
+    thumbnail_token: Option<Option<UploadToken>>,
     /// URL to fetch thumbnail from.
     thumbnail_url: Option<Url>,
 }
@@ -1166,7 +1173,7 @@ async fn update(
             let [content_token, thumbnail_token] = decoded_body.files;
 
             post_update.content_token = content_token;
-            post_update.thumbnail_token = thumbnail_token;
+            post_update.thumbnail_token = thumbnail_token.map(Some);
             update_impl(ctx, post_id, params, post_update).await
         }
     }
@@ -1716,7 +1723,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
     async fn update() -> ApiResult<()> {
         const POST_ID: i64 = 5;
@@ -1777,6 +1784,16 @@ mod test {
         assert!(new_post.last_edit_time > post.last_edit_time);
         assert_eq!(new_tag_count, tag_count);
         assert_eq!(new_relation_count, relation_count);
+
+        assert_eq!(post.custom_thumbnail_size, 0);
+        simulate_upload("1_pixel.png", "thumbnail.png")?;
+        verify_response(&format!("PUT /post/{POST_ID}/?{FIELDS}"), "post/edit_thumbnail").await?;
+        let (new_post, _, _) = get_post_info(&mut conn)?;
+        assert_ne!(new_post.custom_thumbnail_size, 0);
+
+        verify_response(&format!("PUT /post/{POST_ID}/?{FIELDS}"), "post/edit_thumbnail_removal").await?;
+        let (new_post, _, _) = get_post_info(&mut conn)?;
+        assert_eq!(new_post.custom_thumbnail_size, 0);
         Ok(())
     }
 
