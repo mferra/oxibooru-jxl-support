@@ -9,11 +9,12 @@ use crate::model::enums::{AvatarStyle, MimeType, PostFlags, PostSafety, PostType
 use crate::model::pool::PoolPost;
 use crate::model::post::{NewPostNote, Post, PostFavorite, PostNote, PostRelation, PostScore, PostTag};
 use crate::model::tag::TagName;
+use crate::resource;
 use crate::resource::comment::CommentInfo;
+use crate::resource::field::{Batcher, Mask};
 use crate::resource::pool::MicroPool;
 use crate::resource::tag::MicroTag;
 use crate::resource::user::MicroUser;
-use crate::resource::{self, BoolFill};
 use crate::schema::{
     comment, comment_score, comment_statistics, pool, pool_category, pool_name, pool_statistics, post, post_favorite,
     post_note, post_relation, post_score, tag, tag_category, tag_name, tag_statistics, user,
@@ -33,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
-use strum::{EnumString, EnumTable};
+use strum::EnumString;
 use utoipa::ToSchema;
 
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -86,7 +87,7 @@ pub struct MicroPost {
     pub thumbnail_url: String,
 }
 
-#[derive(Clone, Copy, EnumString, EnumTable)]
+#[derive(Clone, Copy, EnumString)]
 #[strum(serialize_all = "camelCase")]
 pub enum Field {
     Version,
@@ -126,9 +127,9 @@ pub enum Field {
     HasCustomThumbnail,
 }
 
-impl BoolFill for FieldTable<bool> {
-    fn filled(val: bool) -> Self {
-        Self::filled(val)
+impl From<Field> for u64 {
+    fn from(value: Field) -> Self {
+        value as u64
     }
 }
 
@@ -214,16 +215,11 @@ pub struct PostInfo {
 }
 
 impl PostInfo {
-    pub fn new(conn: &mut PgConnection, ctx: &Context, post: Post, fields: &FieldTable<bool>) -> QueryResult<Self> {
+    pub fn new(conn: &mut PgConnection, ctx: &Context, post: Post, fields: Mask<Field>) -> QueryResult<Self> {
         Self::new_batch(conn, ctx, vec![post], fields).map(resource::single)
     }
 
-    pub fn new_from_id(
-        conn: &mut PgConnection,
-        ctx: &Context,
-        post_id: i64,
-        fields: &FieldTable<bool>,
-    ) -> QueryResult<Self> {
+    pub fn new_from_id(conn: &mut PgConnection, ctx: &Context, post_id: i64, fields: Mask<Field>) -> QueryResult<Self> {
         Self::new_batch_from_ids(conn, ctx, &[post_id], fields).map(resource::single)
     }
 
@@ -231,79 +227,47 @@ impl PostInfo {
         conn: &mut PgConnection,
         ctx: &Context,
         posts: Vec<Post>,
-        fields: &FieldTable<bool>,
+        fields: Mask<Field>,
     ) -> QueryResult<Vec<Self>> {
         #[allow(clippy::wildcard_imports)]
         use crate::schema::post_statistics::dsl::*;
 
-        let mut owners = resource::retrieve(fields[Field::User], || get_owners(conn, &ctx.config, &posts))?;
-        let mut content_urls = resource::retrieve(fields[Field::ContentUrl], || {
-            Ok::<_, Infallible>(get_content_urls(&ctx.config, &posts))
-        })
-        .expect("get_content_urls is infallible");
-        let custom_thumbnail_exists = resource::retrieve(
-            fields[Field::ThumbnailUrl] || fields[Field::HasCustomThumbnail],
-            || Ok::<_, Infallible>(custom_thumbnails_exist(&ctx.config, &posts)),
-        )
-        .expect("custom_thumbnails_exist is infallible");
-        let mut thumbnail_urls = resource::retrieve(fields[Field::ThumbnailUrl], || {
+        let f = Batcher::new(fields, posts.len());
+        let mut owners = f.exec(Field::User, || get_owners(conn, &ctx.config, &posts))?;
+        let Ok(mut content_urls) = f.exec(Field::ContentUrl, || Ok::<_, Infallible>(get_content_urls(&ctx.config, &posts)));
+        let custom_thumbnail_exists = if fields[Field::ThumbnailUrl] || fields[Field::HasCustomThumbnail] {
+            let results = custom_thumbnails_exist(&ctx.config, &posts);
+            assert!(results.is_empty() || results.len() == posts.len());
+            results
+        } else {
+            Vec::new()
+        };
+        let Ok(mut thumbnail_urls) = f.exec(Field::ThumbnailUrl, || {
             Ok::<_, Infallible>(get_thumbnail_urls(&ctx.config, &posts, &custom_thumbnail_exists))
-        })
-        .expect("get_thumbnail_urls is infallible");
+        });
         let mut has_custom_thumbnails = if fields[Field::HasCustomThumbnail] {
             custom_thumbnail_exists
         } else {
             Vec::new()
         };
-        let mut tags = resource::retrieve(fields[Field::Tags], || get_tags(conn, &posts))?;
-        let mut comments = resource::retrieve(fields[Field::Comments], || get_comments(conn, ctx, &posts))?;
-        let mut relations = resource::retrieve(fields[Field::Relations], || get_relations(conn, ctx, &posts))?;
-        let mut pools = resource::retrieve(fields[Field::Pools], || get_pools(conn, &posts))?;
-        let mut notes = resource::retrieve(fields[Field::Notes], || get_notes(conn, &posts))?;
-        let mut scores = resource::retrieve(fields[Field::Score], || get_post_stats!(conn, &posts, score, i64))?;
-        let mut client_scores =
-            resource::retrieve(fields[Field::OwnScore], || get_client_scores(conn, ctx.client, &posts))?;
-        let mut client_favorites =
-            resource::retrieve(fields[Field::OwnFavorite], || get_client_favorites(conn, ctx.client, &posts))?;
-        let mut tag_counts =
-            resource::retrieve(fields[Field::TagCount], || get_post_stats!(conn, &posts, tag_count, i64))?;
-        let mut comment_counts =
-            resource::retrieve(fields[Field::CommentCount], || get_post_stats!(conn, &posts, comment_count, i64))?;
-        let mut relation_counts =
-            resource::retrieve(fields[Field::RelationCount], || get_post_stats!(conn, &posts, relation_count, i64))?;
-        let mut note_counts =
-            resource::retrieve(fields[Field::NoteCount], || get_post_stats!(conn, &posts, note_count, i64))?;
-        let mut favorite_counts =
-            resource::retrieve(fields[Field::FavoriteCount], || get_post_stats!(conn, &posts, favorite_count, i64))?;
-        let mut feature_counts =
-            resource::retrieve(fields[Field::FeatureCount], || get_post_stats!(conn, &posts, feature_count, i64))?;
-        let mut last_feature_times = resource::retrieve(fields[Field::LastFeatureTime], || {
-            get_post_stats!(conn, &posts, last_feature_time, Option<DateTime>)
-        })?;
+        let mut tags = f.exec(Field::Tags, || get_tags(conn, &posts))?;
+        let mut comments = f.exec(Field::Comments, || get_comments(conn, ctx, &posts))?;
+        let mut relations = f.exec(Field::Relations, || get_relations(conn, ctx, &posts))?;
+        let mut pools = f.exec(Field::Pools, || get_pools(conn, &posts))?;
+        let mut notes = f.exec(Field::Notes, || get_notes(conn, &posts))?;
+        let mut scores = f.exec(Field::Score, || get_post_stats!(conn, &posts, score, i64))?;
+        let mut client_scores = f.exec(Field::OwnScore, || get_client_scores(conn, ctx.client, &posts))?;
+        let mut client_favorites = f.exec(Field::OwnFavorite, || get_client_favorites(conn, ctx.client, &posts))?;
+        let mut tag_counts = f.exec(Field::TagCount, || get_post_stats!(conn, &posts, tag_count, i64))?;
+        let mut comment_counts = f.exec(Field::CommentCount, || get_post_stats!(conn, &posts, comment_count, i64))?;
+        let mut relation_counts = f.exec(Field::RelationCount, || get_post_stats!(conn, &posts, relation_count, i64))?;
+        let mut note_counts = f.exec(Field::NoteCount, || get_post_stats!(conn, &posts, note_count, i64))?;
+        let mut favorite_counts = f.exec(Field::FavoriteCount, || get_post_stats!(conn, &posts, favorite_count, i64))?;
+        let mut feature_counts = f.exec(Field::FeatureCount, || get_post_stats!(conn, &posts, feature_count, i64))?;
+        let mut last_feature_times =
+            f.exec(Field::LastFeatureTime, || get_post_stats!(conn, &posts, last_feature_time, Option<DateTime>))?;
         let mut users_who_favorited =
-            resource::retrieve(fields[Field::FavoritedBy], || get_users_who_favorited(conn, &ctx.config, &posts))?;
-
-        let batch_size = posts.len();
-        resource::check_batch_results(batch_size, owners.len());
-        resource::check_batch_results(batch_size, content_urls.len());
-        resource::check_batch_results(batch_size, thumbnail_urls.len());
-        resource::check_batch_results(batch_size, tags.len());
-        resource::check_batch_results(batch_size, comments.len());
-        resource::check_batch_results(batch_size, relations.len());
-        resource::check_batch_results(batch_size, pools.len());
-        resource::check_batch_results(batch_size, notes.len());
-        resource::check_batch_results(batch_size, scores.len());
-        resource::check_batch_results(batch_size, client_scores.len());
-        resource::check_batch_results(batch_size, client_favorites.len());
-        resource::check_batch_results(batch_size, tag_counts.len());
-        resource::check_batch_results(batch_size, comment_counts.len());
-        resource::check_batch_results(batch_size, relation_counts.len());
-        resource::check_batch_results(batch_size, note_counts.len());
-        resource::check_batch_results(batch_size, favorite_counts.len());
-        resource::check_batch_results(batch_size, feature_counts.len());
-        resource::check_batch_results(batch_size, last_feature_times.len());
-        resource::check_batch_results(batch_size, users_who_favorited.len());
-        resource::check_batch_results(batch_size, has_custom_thumbnails.len());
+            f.exec(Field::FavoritedBy, || get_users_who_favorited(conn, &ctx.config, &posts))?;
 
         let mut results = posts
             .into_iter()
@@ -355,7 +319,7 @@ impl PostInfo {
         conn: &mut PgConnection,
         ctx: &Context,
         post_ids: &[i64],
-        fields: &FieldTable<bool>,
+        fields: Mask<Field>,
     ) -> QueryResult<Vec<Self>> {
         let unordered_posts = post::table.filter(post::id.eq_any(post_ids)).load(conn)?;
         let posts = resource::order_as(unordered_posts, post_ids);
