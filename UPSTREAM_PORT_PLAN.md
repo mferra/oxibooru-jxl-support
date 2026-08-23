@@ -35,6 +35,66 @@ on `main`, in priority order below. After each port:
 | 5 | **DONE** (2026-08-23) | `1fadaee0` | File-move errors were silently swallowed | `filesystem.rs` | Confirmed real bug: `move_file` pattern-matched only `ErrorKind::CrossesDevices` on the mapped error, so every other rename failure (permission denied, disk full, etc.) fell through silently and execution continued as if the move succeeded. Fixing this surfaced a **pre-existing latent bug in the test fixture setup**: `swap_posts` assumes generated thumbnails always exist on disk (true in production), but `test.rs`'s `create_posts` never created one, so `api::post::test::merge` started failing once the real error was no longer swallowed. Ported upstream's matching test-fixture fix (copy the source media to `generated_thumbnail_path` too) — this is exactly why upstream bundled that same change into this commit |
 | — | no action needed | `571790bb` (upstream) vs `5f960a05`/`ec16b4a2`/`dc24d882` (ours) | SSRF hardening on `content/download.rs` | `content/download.rs` | Both sides independently hardened this file; ours looks at least as thorough. Flagged only as a merge-conflict hotspot below, not a missing fix |
 
+## Item #6 — missing view-privilege checks (IN PROGRESS, split into sub-items below)
+
+**Upstream commit:** `e8d6c4a5` ("Fixed multiple issues with privilege handling").
+**Confirmed against `main` directly** (not just by the research fork): `api/comment.rs`'s `list` only
+checks `Action::CommentList`, and `update`/`rate` check no view privilege at all. **Bug:** if an admin
+restricts `*_view` privilege to hide a resource type from some rank, that rank can still **list** it, or
+**read it back** by sending an edit/rate/etc. request with an empty/no-op body and inspecting the
+response. Same pattern expected in every other resource file. Also bundles two smaller, unrelated
+privilege bugs: content downloadable without `upload_use_downloader` privilege, and post `source`
+editable with only `post_score` privilege.
+
+**The actual code diff is small per file** (741 lines total across 15 files) — the commit's 345-file /
+13,817-line stat is 99% new upstream test *fixture* files (`test/request/**/*.toml|json`) in a snapshot-test
+format `main` does not use (`main`'s tests are inline `#[tokio::test]` + `verify_response(query, "fixture/name")`
+against `main`'s own fixture files, a different, incompatible layout) — **do not try to port those fixture
+files directly**; new coverage for `main` means writing new `#[tokio::test]` cases in each file's existing
+`mod test` block, following its established style.
+
+**Pattern to apply everywhere** (confirmed in `main`'s `app.rs:70,75` — already present, no new
+infrastructure needed):
+- Every `list`/`get`/similar read handler: keep its existing narrower check (e.g. `Action::CommentList`),
+  and additionally the resource's `*View` action if not already implied.
+- Every `update`/`rate`/`favorite`/mutation-type handler that can leak resource state via its response
+  (i.e. returns the resource, even on a no-op edit): add `ctx.verify_privilege(Action::<Resource>View)?`
+  near the top, alongside its existing edit-privilege checks.
+- Content download / avatar download: gate on `Action::UploadUseDownloader`-equivalent (check `main`'s
+  `Action` enum for the exact name) in `content/download.rs` / `content/mod.rs`.
+- Post `source` field edit: currently gated only by `post_score`-adjacent privilege in `main`'s
+  `update_impl` — needs its own edit-source privilege check (verify `main`'s `Action` enum already has
+  a `PostEditSource`-equivalent variant, or whether this needs adding — check before assuming).
+
+**⚠️ Wrinkle for `user.rs`/`user_token.rs` specifically:** upstream's `e8d6c4a5` also deletes the shared
+`api::verify_privilege(client, required_rank: UserRank)` free function from `api/mod.rs` (the one our
+own item #1 fix uses for the target-rank check) and replaces it with a **private** `fn verify_rank(...)`
+defined inside `user.rs` alone. Do **NOT** delete `main`'s `api::verify_privilege` when porting this —
+`user_token.rs` also depends on it (from item #1). Recommend keeping it as the shared free function in
+`api/mod.rs` under its current name rather than following upstream's later private-per-file refactor;
+that's a cosmetic rename we don't need, and duplicating the helper into both files would be worse.
+(Note: upstream itself later renames `verify_privilege`→`verify_rank` again in a further commit not yet
+investigated — irrelevant to us either way since we're not chasing upstream's exact naming.)
+
+**Sub-items — each independently committable, do in this order (foundational → simple → most-diverged):**
+
+| Sub-item | Status | Files | Approx. code diff (upstream) | Notes |
+|---|---|---|---|---|
+| 6a | TODO | `api/info.rs`, `api/middleware.rs`, `api/password_reset.rs` | 14 + 3 + 3 lines | Smallest, foundational — `info.rs` gates `featured_post` on `ctx.has_privilege(Action::PostViewFeatured)` (method already exists in `main`). `middleware.rs`/`password_reset.rs` changes are test-only style (`Ok(...).await` vs `...await?; Ok(())`) — skip those, not a behavior fix |
+| 6b | TODO | `api/comment.rs` | 109 lines | Confirmed gap in `main` directly (see above). Do this one first among resource files — smallest/simplest resource, good template for the rest |
+| 6c | TODO | `api/pool.rs`, `api/pool_category.rs` | 28 + 33 lines | `main`'s `pool.rs` also has the independent CBZ-import endpoint (`create_from_archive`) — confirm it doesn't need a view-privilege check too (it creates, not reads, so probably not, but verify) |
+| 6d | TODO | `api/tag.rs`, `api/tag_category.rs` | 67 + 64 lines | Check `get_siblings` specifically — it returns tag info, likely needs the view check too |
+| 6e | TODO | `api/user.rs`, `api/user_token.rs` | 147 + 86 lines | **Highest care** — must be reconciled with item #1's rank-check fix in the same functions (see wrinkle above). Do this after 6b-6d once the pattern is well-practiced |
+| 6f | TODO | `api/post.rs`, `api/snapshot.rs` | 103 + 15 lines | `post.rs` is `main`'s most diverged file (JXL/pHash/CBZ admin handlers added in item #4: `recompute_phash`, `regenerate_thumbnail`, `convert_to_jxl` — check whether these need a view-privilege check too, upstream has no equivalent to compare against since it doesn't have these handlers). Also apply the two smaller fixes here: post `source` edit privilege, and content-download privilege (may live in `upload.rs`/`content/download.rs` instead, see 6g) |
+| 6g | TODO | `api/upload.rs`, `content/download.rs`, `content/mod.rs` | 26 + 9 + 19 lines | The `upload_use_downloader` privilege fix lives here |
+
+**After each sub-item:** run `cargo check` + `cargo clippy` + full test suite in an ephemeral podman
+container (see earlier items for the exact pattern — pull `rust:1.95-bookworm`, install
+`build-essential cmake nasm pkg-config perl git postgresql`, set up a local `oxi_test` role/db, write
+`/.env`), add a few new `#[tokio::test]` cases per file confirming an unauthorized (view-privilege-less)
+client is rejected on list/edit, then commit that sub-item alone before moving to the next. Update this
+table's Status column as you go so a future session can resume from exactly where this one stopped.
+
 ## Known merge-conflict hotspots
 
 Files touched by both histories since the fork point — expect conflicts if any
