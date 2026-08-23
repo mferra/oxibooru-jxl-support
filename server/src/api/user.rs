@@ -349,8 +349,8 @@ async fn update_impl(
         .transaction({
             let ctx = ctx.clone();
             move |conn| {
-                let (user_id, user_version): (i64, DateTime) = user::table
-                    .select((user::id, user::last_edit_time))
+                let (user_id, user_version, target_rank): (i64, DateTime, UserRank) = user::table
+                    .select((user::id, user::last_edit_time, user::rank))
                     .filter(user::name.eq(&username))
                     .first(conn)
                     .optional()?
@@ -361,6 +361,7 @@ async fn update_impl(
                 let visibility = if editing_self {
                     Visibility::Full
                 } else {
+                    api::verify_privilege(ctx.client, target_rank)?;
                     Visibility::PublicOnly
                 };
 

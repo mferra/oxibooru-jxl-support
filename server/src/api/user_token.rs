@@ -4,7 +4,7 @@ use crate::api::{ResourceParams, UnpagedResponse};
 use crate::app::AppState;
 use crate::config::Action;
 use crate::extract::{Ctx, Json, Path, Query};
-use crate::model::enums::{AvatarStyle, ResourceType};
+use crate::model::enums::{AvatarStyle, ResourceType, UserRank};
 use crate::model::user::{NewUserToken, UserToken};
 use crate::resource::user::MicroUser;
 use crate::resource::user_token::UserTokenInfo;
@@ -58,8 +58,8 @@ async fn list(
         .transaction({
             let username = username.clone();
             move |conn| {
-                let (user_id, avatar_style): (i64, AvatarStyle) = user::table
-                    .select((user::id, user::avatar_style))
+                let (user_id, avatar_style, target_rank): (i64, AvatarStyle, UserRank) = user::table
+                    .select((user::id, user::avatar_style, user::rank))
                     .filter(user::name.eq(&username))
                     .first(conn)
                     .optional()?
@@ -68,6 +68,9 @@ async fn list(
                 let is_self = ctx.client.id == Some(user_id);
                 let required_rank = if is_self { list_self } else { list_any };
                 api::verify_privilege(ctx.client, required_rank)?;
+                if !is_self {
+                    api::verify_privilege(ctx.client, target_rank)?;
+                }
 
                 user_token::table
                     .filter(user_token::user_id.eq(user_id))
@@ -132,8 +135,8 @@ async fn create(
         .transaction({
             let username = username.clone();
             move |conn| {
-                let (user_id, avatar_style): (i64, AvatarStyle) = user::table
-                    .select((user::id, user::avatar_style))
+                let (user_id, avatar_style, target_rank): (i64, AvatarStyle, UserRank) = user::table
+                    .select((user::id, user::avatar_style, user::rank))
                     .filter(user::name.eq(&username))
                     .first(conn)
                     .optional()?
@@ -142,6 +145,9 @@ async fn create(
                 let is_self = ctx.client.id == Some(user_id);
                 let required_rank = if is_self { create_self } else { create_any };
                 api::verify_privilege(ctx.client, required_rank)?;
+                if !is_self {
+                    api::verify_privilege(ctx.client, target_rank)?;
+                }
 
                 // Delete any expired or disabled tokens owned by user
                 let current_time = DateTime::now();
@@ -220,8 +226,8 @@ async fn update(
         .transaction({
             let username = username.clone();
             move |conn| {
-                let (user_id, avatar_style): (i64, AvatarStyle) = user::table
-                    .select((user::id, user::avatar_style))
+                let (user_id, avatar_style, target_rank): (i64, AvatarStyle, UserRank) = user::table
+                    .select((user::id, user::avatar_style, user::rank))
                     .filter(user::name.eq(&username))
                     .first(conn)
                     .optional()?
@@ -230,6 +236,9 @@ async fn update(
                 let is_self = ctx.client.id == Some(user_id);
                 let required_rank = if is_self { edit_self } else { edit_any };
                 api::verify_privilege(ctx.client, required_rank)?;
+                if !is_self {
+                    api::verify_privilege(ctx.client, target_rank)?;
+                }
 
                 let mut user_token: UserToken = user_token::table
                     .find(token)
@@ -282,19 +291,23 @@ async fn update(
 async fn delete(Ctx(ctx, connection_pool): Ctx, Path((username, token)): Path<(String, Uuid)>) -> ApiResult<Json<()>> {
     connection_pool
         .transaction(move |conn| {
-            let user_token_owner: i64 = user::table
-                .select(user::id)
+            let (user_token_owner, target_rank): (i64, UserRank) = user::table
+                .select((user::id, user::rank))
                 .filter(user::name.eq(username))
                 .first(conn)
                 .optional()?
                 .ok_or(ApiError::NotFound(ResourceType::User))?;
 
-            let action = if ctx.client.id == Some(user_token_owner) {
+            let is_self = ctx.client.id == Some(user_token_owner);
+            let action = if is_self {
                 Action::UserTokenDeleteSelf
             } else {
                 Action::UserTokenDeleteAny
             };
             ctx.verify_privilege(action)?;
+            if !is_self {
+                api::verify_privilege(ctx.client, target_rank)?;
+            }
 
             let _: i32 = diesel::delete(
                 user_token::table
