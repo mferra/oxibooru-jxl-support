@@ -95,13 +95,13 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
     let temp_path = token.path(&ctx.config);
     let mime_type = token.mime_type();
 
-    // Detect animated WebP before classifying post type — always active regardless of the
-    // transcoding flag so the stored type is always correct.
+    // Detect animated WebP/GIF/AVIF before classifying post type — always active regardless
+    // of the transcoding flag so the stored type is always correct.
     let is_animated_webp = mime_type == MimeType::Webp && transcode::webp_is_animated(&temp_path);
     let post_type = if is_animated_webp {
         PostType::Animation
     } else {
-        PostType::from(mime_type)
+        decode::detect_post_type(&temp_path, mime_type)?
     };
 
     let has_sound = match post_type {

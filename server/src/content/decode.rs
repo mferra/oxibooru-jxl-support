@@ -4,7 +4,8 @@ use crate::content::{self, flash};
 use crate::model::enums::{MimeType, PostType};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::event::{FfmpegEvent, LogLevel};
-use image::{DynamicImage, ImageFormat, ImageReader, Limits, RgbImage, RgbaImage};
+use image::codecs::gif::GifDecoder;
+use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, RgbImage, RgbaImage};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -244,6 +245,79 @@ fn flash_image(config: &Config, path: &Path) -> ApiResult<Option<DynamicImage>> 
         u32::MAX - effective_width
     });
     Ok(images.into_iter().next())
+}
+
+/// Returns the post type based on file content for formats where [`PostType::from`] can be
+/// wrong: not every GIF is animated, and some AVIF are. For everything else, this just
+/// defers to the mime type.
+pub fn detect_post_type(file_path: &Path, mime_type: MimeType) -> ApiResult<PostType> {
+    let is_animated = match mime_type {
+        MimeType::Avif => Some(avif_is_animated(file_path)?),
+        MimeType::Gif => Some(gif_is_animated(file_path)?),
+        _ => None,
+    };
+    Ok(match is_animated {
+        Some(true) => PostType::Animation,
+        Some(false) => PostType::Image,
+        None => PostType::from(mime_type),
+    })
+}
+
+/// Returns `true` if the GIF at `path` has more than one frame.
+fn gif_is_animated(path: &Path) -> ApiResult<bool> {
+    let file = content::map_read_result(File::open(path))?;
+    let mut decoder = GifDecoder::new(BufReader::new(file))?;
+    decoder.set_limits(image_reader_limits())?;
+
+    // GIF doesn't store a frame count, so just check for a second frame.
+    let mut frames = decoder.into_frames();
+    Ok(frames.nth(1).is_some())
+}
+
+/// Uses `FFmpeg` to determine if the AVIF at `path` contains more than one frame.
+fn avif_is_animated(path: &Path) -> ApiResult<bool> {
+    let path_str = path.to_string_lossy();
+    let video_stream_count = FfmpegCommand::new_with_path(FFMPEG_PATH)
+        .input(&path_str)
+        .spawn()?
+        .iter()
+        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?
+        .filter(|event| matches!(event, FfmpegEvent::ParsedInputStream(stream) if stream.is_video()))
+        .count();
+
+    for stream_index in 0..video_stream_count {
+        let iter = FfmpegCommand::new_with_path(FFMPEG_PATH)
+            .input(&path_str)
+            .args([
+                "-map",
+                &format!("0:v:{stream_index}"),
+                "-frames:v",
+                "2",
+                "-vf",
+                "scale=1:1:flags=neighbor",
+            ])
+            .rawvideo()
+            .spawn()?
+            .iter()
+            .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
+
+        let mut frames = 0;
+        let mut errors = Vec::new();
+        for event in iter {
+            match event {
+                FfmpegEvent::OutputFrame(_) => frames += 1,
+                FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, err) => errors.push(err),
+                _ => {}
+            }
+        }
+
+        if frames > 1 {
+            return Ok(true);
+        } else if frames == 0 && !errors.is_empty() {
+            return Err(ApiError::FfmpegError(errors.join("; ").into()));
+        }
+    }
+    Ok(false)
 }
 
 /// Returns maximum decoded image size.
