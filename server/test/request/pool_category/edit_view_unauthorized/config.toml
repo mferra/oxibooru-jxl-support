@@ -1,0 +1,4 @@
+[public_info.privileges]
+pool_category_view = "moderator"
+pool_category_edit_name = "anonymous"
+pool_category_edit_color = "anonymous"

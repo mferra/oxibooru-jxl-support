@@ -5,3 +5,4 @@ hide_untagged = true
 
 [public_info.privileges]
 pool_list = "anonymous"
+pool_view = "anonymous"

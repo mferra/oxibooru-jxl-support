@@ -86,6 +86,7 @@ async fn list(
     Query(resource): Query<ResourceParams<Field>>,
     Query(page): Query<PageParams>,
 ) -> ApiResult<Json<PagedResponse<PoolInfo>>> {
+    ctx.verify_privilege(Action::PoolView)?;
     ctx.verify_privilege(Action::PoolList)?;
 
     let offset = page.offset.unwrap_or(0);
@@ -251,6 +252,7 @@ async fn merge(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<MergeBody<i64>>,
 ) -> ApiResult<Json<PoolInfo>> {
+    ctx.verify_privilege(Action::PoolView)?;
     ctx.verify_privilege(Action::PoolMerge)?;
 
     let absorbed_id = body.remove;
@@ -337,6 +339,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<PoolUpdateBody>,
 ) -> ApiResult<Json<PoolInfo>> {
+    ctx.verify_privilege(Action::PoolView)?;
+
     connection_pool
         .transaction({
             let ctx = ctx.clone();
@@ -798,5 +802,15 @@ mod test {
 
         reset_sequence(ResourceType::Pool)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        // Ensure users can't get around lack of view privileges via other actions
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "GET /pools?limit=1", "pool/list_view_unauthorized").await?;
+        verify_response_with_user(USER, "POST /pool-merge", "pool/merge_view_unauthorized").await?;
+        verify_response_with_user(USER, "PUT /pool/1", "pool/edit_view_unauthorized").await
     }
 }

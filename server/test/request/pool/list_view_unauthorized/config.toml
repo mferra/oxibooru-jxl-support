@@ -1,0 +1,3 @@
+[public_info.privileges]
+pool_view = "moderator"
+pool_list = "anonymous"
