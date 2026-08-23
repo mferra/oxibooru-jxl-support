@@ -1,5 +1,6 @@
 use crate::api::error::{ApiError, ApiResult};
-use crate::config::Config;
+use crate::app::Context;
+use crate::config::Action;
 use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
 use crate::filesystem;
 use axum::body::Bytes;
@@ -186,20 +187,24 @@ fn limited_stream(response: Response) -> ApiResult<impl Stream<Item = ApiResult<
 /// Attempts to download file at the specified `url`.
 /// If successful, the file is saved in the temporary uploads directory
 /// and a content token is returned.
-pub async fn from_url(config: &Config, url: Url) -> ApiResult<UploadToken> {
+pub async fn from_url(ctx: &Context, url: Url) -> ApiResult<UploadToken> {
+    ctx.verify_privilege(Action::UploadUseDownloader)?;
+
     let response = fetch_response(url, false).await?;
     let stream = limited_stream(response)?;
-    filesystem::save_uploaded_file(config, stream).await
+    filesystem::save_uploaded_file(&ctx.config, stream).await
 }
 
 /// Downloads an archive (e.g. a CBZ) from `url` into the temporary uploads
 /// directory and returns its path. Unlike [`from_url`], the Content-Type is
 /// not validated, since archives never become post content. Private (LAN)
 /// targets are permitted when `allow_lan_archive_downloads` is enabled.
-pub async fn archive_from_url(config: &Config, url: Url) -> ApiResult<PathBuf> {
-    let response = fetch_response(url, config.allow_lan_archive_downloads).await?;
+pub async fn archive_from_url(ctx: &Context, url: Url) -> ApiResult<PathBuf> {
+    ctx.verify_privilege(Action::UploadUseDownloader)?;
+
+    let response = fetch_response(url, ctx.config.allow_lan_archive_downloads).await?;
     let stream = limited_stream(response)?;
-    filesystem::save_uploaded_archive(config, stream).await
+    filesystem::save_uploaded_archive(&ctx.config, stream).await
 }
 
 #[cfg(test)]
@@ -248,18 +253,34 @@ mod test {
         assert!(!is_blocked_ip(IpAddr::V6(Ipv4Addr::new(8, 8, 8, 8).to_ipv6_mapped())), "mapped global address");
     }
 
+    /// Builds a `Context` with enough privilege to reach the SSRF-blocking logic under
+    /// test, without needing a live database connection pool.
+    fn test_context() -> Context {
+        use crate::auth::Client;
+        use crate::content::cache::RingCache;
+        use crate::model::enums::UserRank;
+        use std::sync::{Arc, Mutex};
+
+        Context {
+            client: Client::new(None, UserRank::Administrator),
+            config: Arc::new(crate::config::test_config(None)),
+            content_cache: Arc::new(Mutex::new(RingCache::new(1))),
+            av1_supported: false,
+        }
+    }
+
     #[tokio::test]
     async fn rejects_disallowed_schemes() {
-        let config = crate::config::test_config(None);
+        let ctx = test_context();
         for url in ["file:///etc/passwd", "ftp://example.com/file", "gopher://example.com/", "data:text/plain,hi"] {
-            let result = from_url(&config, Url::parse(url).unwrap()).await;
+            let result = from_url(&ctx, Url::parse(url).unwrap()).await;
             assert!(result.is_err(), "{url} should be rejected");
         }
     }
 
     #[tokio::test]
     async fn rejects_requests_to_internal_addresses() {
-        let config = crate::config::test_config(None);
+        let ctx = test_context();
         for url in [
             "http://127.0.0.1/",
             "http://localhost/",
@@ -268,7 +289,7 @@ mod test {
             "http://[::1]/",
             "http://[fc00::1]/",
         ] {
-            let result = from_url(&config, Url::parse(url).unwrap()).await;
+            let result = from_url(&ctx, Url::parse(url).unwrap()).await;
             assert!(result.is_err(), "{url} should be rejected");
         }
     }

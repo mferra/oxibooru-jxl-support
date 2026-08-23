@@ -537,7 +537,7 @@ async fn create_from_archive(
                 .and_then(|mut segments| segments.next_back())
                 .unwrap_or("")
                 .to_owned();
-            let archive_path = download::archive_from_url(&ctx.config, url).await?;
+            let archive_path = download::archive_from_url(&ctx, url).await?;
             (archive_path, default_name, payload)
         }
         JsonOrMultipart::Multipart(mut payload) => {

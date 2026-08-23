@@ -1,7 +1,7 @@
 use crate::api::doc::UPLOAD_TAG;
 use crate::api::error::{ApiError, ApiResult};
-use crate::app::AppState;
-use crate::config::{Action, Config};
+use crate::app::{AppState, Context};
+use crate::config::Action;
 use crate::content::upload::{MAX_UPLOAD_SIZE, PartName, UploadToken};
 use crate::content::{download, upload};
 use crate::extract::{Ctx, Json, JsonOrMultipart};
@@ -45,8 +45,8 @@ struct UploadResponse {
     token: UploadToken,
 }
 
-async fn upload_from_url(config: &Config, body: UploadBody) -> ApiResult<Json<UploadResponse>> {
-    let token = download::from_url(config, body.content_url).await?;
+async fn upload_from_url(ctx: &Context, body: UploadBody) -> ApiResult<Json<UploadResponse>> {
+    let token = download::from_url(ctx, body.content_url).await?;
     Ok(Json(UploadResponse { token }))
 }
 
@@ -74,17 +74,34 @@ async fn upload(Ctx(ctx, _): Ctx, body: JsonOrMultipart<UploadBody>) -> ApiResul
     ctx.verify_privilege(Action::UploadCreate)?;
 
     match body {
-        JsonOrMultipart::Json(payload) => upload_from_url(&ctx.config, payload).await,
+        JsonOrMultipart::Json(payload) => upload_from_url(&ctx, payload).await,
         JsonOrMultipart::Multipart(payload) => {
             let decoded_body = upload::extract(&ctx.config, payload, [PartName::Content]).await?;
             if let [Some(token)] = decoded_body.files {
                 Ok(Json(UploadResponse { token }))
             } else if let Some(metadata) = decoded_body.metadata {
                 let url_upload: UploadBody = serde_json::from_slice(&metadata)?;
-                upload_from_url(&ctx.config, url_upload).await
+                upload_from_url(&ctx, url_upload).await
             } else {
                 Err(ApiError::MissingFormData)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::api::error::ApiResult;
+    use crate::model::enums::UserRank;
+    use crate::test::*;
+    use serial_test::parallel;
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        // upload_create stays at its default "regular" rank, but upload_use_downloader
+        // defaults to "power" — a regular user can reach the URL-download codepath via
+        // upload_create but must still be rejected by the higher downloader privilege.
+        verify_response_with_user(UserRank::Regular, "POST /uploads", "upload/download_unauthorized").await
     }
 }
