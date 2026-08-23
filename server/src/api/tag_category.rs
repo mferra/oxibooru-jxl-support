@@ -41,6 +41,7 @@ async fn list(
     Ctx(ctx, connection_pool): Ctx,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<UnpagedResponse<TagCategoryInfo>>> {
+    ctx.verify_privilege(Action::TagCategoryView)?;
     ctx.verify_privilege(Action::TagCategoryList)?;
 
     connection_pool
@@ -185,6 +186,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<TagCategoryUpdateBody>,
 ) -> ApiResult<Json<TagCategoryInfo>> {
+    ctx.verify_privilege(Action::TagCategoryView)?;
+
     let updated_category = connection_pool
         .transaction(move |conn| {
             let old_category: TagCategory = tag_category::table
@@ -245,6 +248,7 @@ async fn set_default(
     Path(name): Path<SmallString>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<TagCategoryInfo>> {
+    ctx.verify_privilege(Action::TagCategoryView)?;
     ctx.verify_privilege(Action::TagCategorySetDefault)?;
 
     let new_default_category: TagCategory = connection_pool
@@ -514,5 +518,20 @@ mod test {
 
         reset_sequence(ResourceType::PoolCategory)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Anonymous, "GET /tag-categories?limit=1", "tag_category/list_view_unauthorized")
+            .await?;
+        verify_response_with_user(UserRank::Moderator, "PUT /tag-category/default", "tag_category/edit_view_unauthorized")
+            .await?;
+        verify_response_with_user(
+            UserRank::Moderator,
+            "PUT /tag-category/meta/default",
+            "tag_category/set_default_view_unauthorized",
+        )
+        .await
     }
 }

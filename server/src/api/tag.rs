@@ -89,6 +89,7 @@ async fn list(
     Query(resource): Query<ResourceParams<Field>>,
     Query(page): Query<PageParams>,
 ) -> ApiResult<Json<PagedResponse<TagInfo>>> {
+    ctx.verify_privilege(Action::TagView)?;
     ctx.verify_privilege(Action::TagList)?;
 
     let offset = page.offset.unwrap_or(0);
@@ -186,6 +187,7 @@ async fn get_siblings(
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<TagSiblings>> {
     ctx.verify_privilege(Action::TagView)?;
+    ctx.verify_privilege(Action::TagList)?;
 
     connection_pool
         .transaction(move |conn| {
@@ -351,6 +353,7 @@ async fn merge(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<MergeBody<SmallString>>,
 ) -> ApiResult<Json<TagInfo>> {
+    ctx.verify_privilege(Action::TagView)?;
     ctx.verify_privilege(Action::TagMerge)?;
 
     let get_tag_info = |conn: &mut PgConnection, name: &str| {
@@ -436,6 +439,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<TagUpdateBody>,
 ) -> ApiResult<Json<TagInfo>> {
+    ctx.verify_privilege(Action::TagView)?;
+
     let tag_id = connection_pool
         .transaction(move |conn| {
             let old_tag: Tag = tag::table
@@ -852,5 +857,15 @@ mod test {
 
         reset_sequence(ResourceType::Tag)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Regular, "GET /tags?limit=1", "tag/list_view_unauthorized").await?;
+        verify_response_with_user(UserRank::Regular, "GET /tag-siblings/plant", "tag/get_siblings_view_unauthorized")
+            .await?;
+        verify_response_with_user(UserRank::Power, "PUT /tag/sky", "tag/edit_view_unauthorized").await?;
+        verify_response_with_user(UserRank::Moderator, "POST /tag-merge", "tag/merge_view_unauthorized").await
     }
 }
