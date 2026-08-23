@@ -92,6 +92,7 @@ async fn list(
     Query(resource): Query<ResourceParams<Field>>,
     Query(page): Query<PageParams>,
 ) -> ApiResult<Json<PagedResponse<UserInfo>>> {
+    ctx.verify_privilege(Action::UserView)?;
     ctx.verify_privilege(Action::UserList)?;
 
     let offset = page.offset.unwrap_or(0);
@@ -196,7 +197,7 @@ async fn create_impl(
 
     let avatar_style = body.avatar_style.unwrap_or_default();
     let custom_avatar = match Content::new(body.avatar_token, body.avatar_url) {
-        Some(content) => Some(content.thumbnail(&ctx.config, ThumbnailType::Avatar).await?),
+        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Avatar).await?),
         None if avatar_style == AvatarStyle::Manual => {
             return Err(ApiError::MissingContent(ResourceType::User));
         }
@@ -332,7 +333,7 @@ async fn update_impl(
     body: UserUpdateBody,
 ) -> ApiResult<Json<UserInfo>> {
     let custom_avatar = match Content::new(body.avatar_token, body.avatar_url) {
-        Some(content) => Some(content.thumbnail(&ctx.config, ThumbnailType::Avatar).await?),
+        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Avatar).await?),
         None if body.avatar_style == Some(AvatarStyle::Manual) => {
             return Err(ApiError::MissingContent(ResourceType::User));
         }
@@ -528,6 +529,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     body: JsonOrMultipart<UserUpdateBody>,
 ) -> ApiResult<Json<UserInfo>> {
+    ctx.verify_privilege(Action::UserView)?;
+
     match body {
         JsonOrMultipart::Json(payload) => update_impl(ctx, username, params, payload).await,
         JsonOrMultipart::Multipart(payload) => {
@@ -783,6 +786,17 @@ mod test {
 
         reset_sequence(ResourceType::User)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        // user_list/user_edit_self_email stay at their default "regular" rank in these
+        // fixtures, but user_view is raised above it, so a regular user must still be
+        // rejected despite otherwise having permission to perform the action.
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "GET /users?limit=1", "user/list_view_unauthorized").await?;
+        verify_response_with_user(USER, "PUT /user/regular_user", "user/edit_view_unauthorized").await
     }
 
     #[tokio::test]
