@@ -192,6 +192,7 @@ async fn list(
     Query(resource): Query<ResourceParams<Field>>,
     Query(page): Query<PageParams>,
 ) -> ApiResult<Json<PagedResponse<PostInfo>>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostList)?;
 
     let offset = page.offset.unwrap_or(0);
@@ -276,7 +277,7 @@ async fn get_neighbors(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostNeighbors>> {
-    ctx.verify_privilege(Action::PostList)?;
+    ctx.verify_privilege(Action::PostView)?;
 
     let create_post_neighbors = |mut neighbors: Vec<PostInfo>, has_previous_post: bool| {
         let (prev, next) = match (neighbors.pop(), neighbors.pop()) {
@@ -424,6 +425,7 @@ async fn feature(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<FeatureBody>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostFeature)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
@@ -461,8 +463,6 @@ async fn reverse_search_impl(
     params: ResourceParams<Field>,
     body: ReverseSearchBody,
 ) -> ApiResult<Json<ReverseSearchResponse>> {
-    ctx.verify_privilege(Action::PostReverseSearch)?;
-
     let content =
         Content::new(body.content_token, body.content_url).ok_or(ApiError::MissingContent(ResourceType::Post))?;
     let content_properties = content.compute_properties(&ctx).await?;
@@ -568,6 +568,7 @@ async fn reverse_search(
     Query(params): Query<ResourceParams<Field>>,
     body: JsonOrMultipart<ReverseSearchBody>,
 ) -> ApiResult<Json<ReverseSearchResponse>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostReverseSearch)?;
 
     match body {
@@ -603,7 +604,7 @@ async fn create_impl(ctx: Ctx, params: ResourceParams<Field>, body: PostCreateBo
 
     let Ctx(ctx, connection_pool) = ctx;
     let custom_thumbnail = match Content::new(body.thumbnail_token, body.thumbnail_url) {
-        Some(content) => Some(content.thumbnail(&ctx.config, ThumbnailType::Post).await?),
+        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Post).await?),
         None => None,
     };
     let flags = content_properties.flags | PostFlags::from_slice(&body.flags.unwrap_or_default());
@@ -812,6 +813,7 @@ async fn merge(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<PostMergeBody>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostMerge)?;
 
     let absorbed_id = body.post_info.remove;
@@ -868,6 +870,7 @@ async fn favorite(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostFavorite)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
@@ -913,6 +916,7 @@ async fn rate(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<RatingBody>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostScore)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
@@ -954,7 +958,7 @@ async fn update_impl(
 
     let Ctx(ctx, connection_pool) = ctx;
     let custom_thumbnail = match Content::new(body.thumbnail_token, body.thumbnail_url) {
-        Some(content) => Some(content.thumbnail(&ctx.config, ThumbnailType::Post).await?),
+        Some(content) => Some(content.thumbnail(&ctx, ThumbnailType::Post).await?),
         None => None,
     };
 
@@ -989,7 +993,7 @@ async fn update_impl(
                 new_snapshot_data.flags = updated_flags;
             }
             if let Some(source) = body.source {
-                ctx.verify_privilege(Action::PostScore)?;
+                ctx.verify_privilege(Action::PostEditSource)?;
 
                 new_post.source = source.clone();
                 new_snapshot_data.source = source;
@@ -1151,6 +1155,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     body: JsonOrMultipart<PostUpdateBody>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
+
     match body {
         JsonOrMultipart::Json(payload) => update_impl(ctx, post_id, params, payload).await,
         JsonOrMultipart::Multipart(payload) => {
@@ -1250,6 +1256,7 @@ async fn unfavorite(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostFavorite)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
@@ -1285,6 +1292,7 @@ async fn recompute_phash(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostRecomputeHash)?;
 
     let config = Arc::clone(&ctx.config);
@@ -1317,6 +1325,7 @@ async fn regenerate_thumbnail(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostRegenerateThumbnail)?;
 
     let config = Arc::clone(&ctx.config);
@@ -1350,6 +1359,7 @@ async fn convert_to_jxl(
     Path(post_id): Path<i64>,
     Query(params): Query<ResourceParams<Field>>,
 ) -> ApiResult<Json<PostInfo>> {
+    ctx.verify_privilege(Action::PostView)?;
     ctx.verify_privilege(Action::PostConvertToJxl)?;
 
     let config = Arc::clone(&ctx.config);
@@ -1855,6 +1865,22 @@ mod test {
 
         reset_sequence(ResourceType::Post)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        // post_list/post_edit_description stay at their default rank in these fixtures,
+        // but post_view is raised above it, so a regular user must still be rejected
+        // despite otherwise having permission to perform the action.
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "GET /posts?limit=1", "post/list_view_unauthorized").await?;
+        verify_response_with_user(USER, "PUT /post/1", "post/edit_view_unauthorized").await?;
+
+        // post_edit_source was previously (incorrectly) gated by post_score instead of its
+        // own privilege; a regular user (who has post_score by default) must still be
+        // rejected when post_edit_source specifically is raised.
+        verify_response_with_user(USER, "PUT /post/1", "post/edit_source_unauthorized").await
     }
 
     #[tokio::test]
