@@ -5,3 +5,4 @@ hide_untagged = true
 
 [public_info.privileges]
 comment_list = "anonymous"
+comment_view = "anonymous"

@@ -72,6 +72,7 @@ async fn list(
     Query(resource): Query<ResourceParams<Field>>,
     Query(page): Query<PageParams>,
 ) -> ApiResult<Json<PagedResponse<CommentInfo>>> {
+    ctx.verify_privilege(Action::CommentView)?;
     ctx.verify_privilege(Action::CommentList)?;
 
     let offset = page.offset.unwrap_or(0);
@@ -207,6 +208,8 @@ async fn update(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<CommentUpdateBody>,
 ) -> ApiResult<Json<CommentInfo>> {
+    ctx.verify_privilege(Action::CommentView)?;
+
     let client = ctx.client;
     let edit_own = ctx.config.privileges()[Action::CommentEditOwn];
     let edit_any = ctx.config.privileges()[Action::CommentEditAny];
@@ -261,6 +264,7 @@ async fn rate(
     Query(params): Query<ResourceParams<Field>>,
     Json(body): Json<RatingBody>,
 ) -> ApiResult<Json<CommentInfo>> {
+    ctx.verify_privilege(Action::CommentView)?;
     ctx.verify_privilege(Action::CommentScore)?;
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
@@ -552,5 +556,18 @@ mod test {
 
         reset_sequence(ResourceType::Comment)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn unauthorized() -> ApiResult<()> {
+        // Comment 1 is owned by regular_user; comment_list/comment_edit_own/comment_score all
+        // stay at their default "regular" rank in these fixtures, but comment_view is raised
+        // above it, so a regular user must still be rejected despite otherwise having
+        // permission to perform the action.
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "GET /comments?limit=1", "comment/list_view_unauthorized").await?;
+        verify_response_with_user(USER, "PUT /comment/1", "comment/edit_view_unauthorized").await?;
+        verify_response_with_user(USER, "PUT /comment/1/score", "comment/rating_view_unauthorized").await
     }
 }
