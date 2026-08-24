@@ -458,13 +458,9 @@ class Api extends events.EventTarget {
             try {
                 if (this.userName && this.token) {
                     req.auth = null;
-                    // eslint-disable-next-line no-undef
                     req.set(
                         "Authorization",
-                        "Token " +
-                            new Buffer(
-                                this.userName + ":" + this.token
-                            ).toString("base64")
+                        "Token " + btoa(this.userName + ":" + this.token)
                     );
                 } else if (this.userName && this.userPassword) {
                     req.auth(
