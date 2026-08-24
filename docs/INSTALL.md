@@ -6,20 +6,11 @@ This guide assumes that you have Docker (version 19.03 or greater) and the Docke
 
 ## Installing
 
-1. **Download the `oxibooru` source**
-
-    To get started either clone the repository with
+1. **Download the source**
 
     ```sh
-    git clone https://github.com/liamw1/oxibooru
-    ```
-
-    or download the latest release from the [releases page](https://github.com/liamw1/oxibooru/releases). By default, a freshly cloned repo will use the `latest` images, whereas a release package will be fixed to a particular version. **Be warned that by using `latest` images, you are opting out of stability**. See [Versioning](#versioning) for details.
-
-    Enter the `oxibooru` directory:
-
-    ```sh
-    cd oxibooru
+    git clone https://github.com/maurohoracio/oxibooru-jxl-support
+    cd oxibooru-jxl-support
     ```
 
 2. **Configure the application**
@@ -35,39 +26,33 @@ This guide assumes that you have Docker (version 19.03 or greater) and the Docke
 
     Any fields not present will default to their corresponding value in the original `config.toml.dist`, so feel free to remove fields that are uneeded or irrelevant.
 
-3. **Configure Docker Compose**
+3. **Pick a compose file**
+
+    There are two compose files, both self-contained (no `.env` file needed — everything is set
+    directly in the file; edit it in place if you want different credentials, ports, etc.):
+
+    - **`docker-compose-2.yml`** — builds the server and client images from source. Use this
+      unless you're deploying pre-built images from a registry.
+    - **`docker-compose.yml`** — pulls pre-built images instead of building. Points at a
+      specific registry namespace by default; edit its `image:` fields to point at wherever
+      you've published your own images (see [`server/BUILD.md`](../server/BUILD.md#publishing-images-to-a-registry))
+      before using it.
+
+    Data and database storage use named Docker volumes in both files, so there's no host mount
+    directory to `chown` beforehand.
+
+4. **Build (or pull) and run it**
+
+    Build from source and start:
 
     ```sh
-    cp example.env .env
-    edit .env
+    docker compose -f docker-compose-2.yml up -d --build
     ```
 
-    Change the values of the variables in `.env` as needed. Read the comments to guide you. Note that `.env` should be in the root directory of this repository.
-
-4. **Pull the containers**
-    
-    This pulls the latest containers from docker.io:
+    ...or, once you have images published to a registry:
 
     ```sh
     docker compose pull
-    ```
-
-    If you have modified the application's source and would like to manually build it, follow the instructions in [Building](#building) instead, then read here once you're done.
-
-5. **Give mount directories permissions**
-
-    Set owner of mount directories (MOUNT_DATA and MOUNT_SQL in the .env) to the user with id 1000:
-
-    ```sh
-    sudo chown -R 1000:1000 "$MOUNT_DATA"
-    sudo chown -R 1000:1000 "$MOUNT_SQL"
-    ```
-
-6. **Run it!**
-
-    To start all containers:
-
-    ```sh
     docker compose up -d
     ```
 
@@ -78,23 +63,11 @@ This guide assumes that you have Docker (version 19.03 or greater) and the Docke
     # (CTRL+C to exit)
     ```
 
-## Versioning
+    If your changes aren't taking effect in a rebuild, add `--no-cache` to the `--build` /
+    `docker compose build` step.
 
-Oxibooru uses a semantic versioning system to distinguish between backwards compatible and backwards incompatbile versions. An increase in the leading non-zero version number means that the change is breaking, meaning that once you upgrade it may be difficult or impossible to revert to a previous version (typically due to changes in the database schema or data store). For example, it's fine to swap back and forth between versions `0.6.0` and `0.6.2`, but an upgrade from `0.6.2` and `0.7.0` is irreversible. A breaking change may also necesitate downtime due to expensive database migrations.
-
-To change the version of an image, edit the image field in `docker-compose.yml`. The field follows the format `oxibooru/[server|client]:<version>`. There are a few different options for image versioning depending on your appetite for volatility. For maximum stability, you can use the fixed version images, e.g. `0.6.1`. These are never modified after creation, so you can pretty much guarantee that their behavior will stay the same forever. If you like being on the cutting edge, use the `latest` images. They are frequently (but not recklessly) updated with the latest fixes and features, but may introduce breaking changes or time-consuming migrations at any time. For a middle ground, there's also the major and minor version images, e.g. `0` and `0.7`, which are updated with the latest changes up to that major or minor version number.
-
-## Building
-
-To build the client and server containers, run
-
-```sh
-docker compose build
-```
-
-*Note: If your changes are not taking effect in your builds, consider building
-with `--no-cache`.*
-
-#### Performance tip
-
-If you're already building yourself, consider setting `TARGET_CPU` to `native` in the `docker-compose.yml`. This instructions the Rust compiler to target your exact CPU architecture, resulting in better codegen and may result in measurable performance improvements to image decoding and reverse search operations.
+    **Performance tip:** if you're building yourself, add a `build.args` block with
+    `TARGET_CPU: native` to the `server` service in whichever compose file you're using
+    (neither sets it by default). This targets the Rust compiler at your exact CPU, which can
+    measurably speed up image decoding and reverse search — at the cost of a binary that may
+    not run on other machines.

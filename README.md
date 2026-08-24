@@ -80,26 +80,50 @@ Optional build arguments:
 
 ### Docker Compose (full stack)
 
+This repo has two compose files:
+
+- **`docker-compose-2.yml`** — builds server and client from source. Use this to test local
+  changes. Uses named Docker volumes, so there's no host directory permission setup needed.
+- **`docker-compose.yml`** — pulls pre-built images from a registry (see
+  [Publishing images to a registry](#publishing-images-to-a-registry) below) for running a
+  deployment without rebuilding on the host. Edit the `image:` lines to point at your own
+  registry namespace before using it.
+
 ```sh
-# 1. Copy and edit application config
+# 1. Copy and edit application config (at minimum, change password_secret and content_secret)
 cp server/config.toml.dist server/config.toml
 
-# 2. Copy and edit environment variables
-cp example.env .env
+# 2. Build from source and start (local testing)
+docker compose -f docker-compose-2.yml up -d --build
 
-# 3. Set mount directory ownership (container runs as UID 1000)
-sudo chown -R 1000:1000 "$MOUNT_DATA"
-sudo chown -R 1000:1000 "$MOUNT_SQL"
-
-# 4. Build from source (or use `docker compose pull` for pre-built images)
-docker compose build
-
-# 5. Start
+# ...or, once you've published images (see below), run the pre-built ones
 docker compose up -d
+
 docker compose logs -f
 ```
 
 See [`server/BUILD.md`](server/BUILD.md) for the full build reference.
+
+### Publishing images to a registry
+
+To deploy without building on the target host, build the server and client images and push
+them to a container registry (e.g. Docker Hub). From the repository root:
+
+```sh
+# Pick your own registry namespace/tag - this example uses Docker Hub
+REGISTRY=docker.io/yourusername
+
+docker build -t $REGISTRY/oxibooru_server:latest ./server
+docker build -t $REGISTRY/oxibooru_client:latest ./client
+
+docker login
+docker push $REGISTRY/oxibooru_server:latest
+docker push $REGISTRY/oxibooru_client:latest
+```
+
+Then point `docker-compose.yml`'s `image:` fields at `$REGISTRY/oxibooru_server:latest` and
+`$REGISTRY/oxibooru_client:latest`, and `docker compose pull && docker compose up -d` on the
+deployment host.
 
 ---
 
