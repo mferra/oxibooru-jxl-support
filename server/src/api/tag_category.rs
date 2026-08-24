@@ -190,11 +190,7 @@ async fn update(
 
     let updated_category = connection_pool
         .transaction(move |conn| {
-            let old_category: TagCategory = tag_category::table
-                .filter(tag_category::name.eq(name))
-                .first(conn)
-                .optional()?
-                .ok_or(ApiError::NotFound(ResourceType::TagCategory))?;
+            let old_category = verify_visibility(conn, &ctx, &name)?;
             api::verify_version(old_category.last_edit_time, body.version)?;
 
             let mut new_category = old_category.clone();
@@ -253,11 +249,7 @@ async fn set_default(
 
     let new_default_category: TagCategory = connection_pool
         .transaction(move |conn| {
-            let mut category: TagCategory = tag_category::table
-                .filter(tag_category::name.eq(name))
-                .first(conn)
-                .optional()?
-                .ok_or(ApiError::NotFound(ResourceType::TagCategory))?;
+            let mut category = verify_visibility(conn, &ctx, &name)?;
             let mut old_default_category: TagCategory =
                 tag_category::table.filter(TagCategory::default()).first(conn)?;
 
@@ -335,11 +327,7 @@ async fn delete(
 
     connection_pool
         .transaction(move |conn| {
-            let category: TagCategory = tag_category::table
-                .filter(tag_category::name.eq(name))
-                .first(conn)
-                .optional()?
-                .ok_or(ApiError::NotFound(ResourceType::TagCategory))?;
+            let category = verify_visibility(conn, &ctx, &name)?;
             api::verify_version(category.last_edit_time, *client_version)?;
             if category.id == 0 {
                 return Err(ApiError::DeleteDefault(ResourceType::TagCategory));
@@ -499,7 +487,21 @@ mod test {
         )
         .await?;
         verify_response_with_user(UserRank::Anonymous, "GET /tag-category/meta", "tag_category/get_with_preferences")
-            .await
+            .await?;
+        verify_response_with_user(UserRank::Anonymous, "PUT /tag-category/meta", "tag_category/edit_of_blacklisted")
+            .await?;
+        verify_response_with_user(
+            UserRank::Anonymous,
+            "PUT /tag-category/meta/default",
+            "tag_category/set_default_of_blacklisted",
+        )
+        .await?;
+        verify_response_with_user(
+            UserRank::Anonymous,
+            "DELETE /tag-category/meta",
+            "tag_category/delete_of_blacklisted",
+        )
+        .await
     }
 
     #[tokio::test]
