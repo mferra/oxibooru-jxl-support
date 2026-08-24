@@ -475,7 +475,6 @@ fn convert_post_to_jxl_in_parallel(
 
     // Skip already-JXL posts.
     if mime_type == MimeType::Jxl {
-        info!("Post {post_id}: skipped — already JXL");
         skipped.increment();
         return Ok(());
     }
