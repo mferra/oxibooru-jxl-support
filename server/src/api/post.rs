@@ -436,20 +436,25 @@ async fn feature(
     };
 
     connection_pool
-        .transaction(move |conn| {
-            let previous_feature_id = post_feature::table
-                .select(post_feature::post_id)
-                .order(post_feature::time.desc())
-                .first(conn)
-                .optional()?;
-            if previous_feature_id == Some(new_post_feature.post_id) {
-                return Err(ApiError::AlreadyExists(ResourceProperty::PostFeature));
-            }
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, body.id)?;
 
-            let insert_result = new_post_feature.insert_into(post_feature::table).execute(conn);
-            error::map_foreign_key_violation(insert_result, ResourceType::Post)?;
-            snapshot::post::feature_snapshot(conn, ctx.client, previous_feature_id, body.id)?;
-            Ok::<_, ApiError>(())
+                let previous_feature_id = post_feature::table
+                    .select(post_feature::post_id)
+                    .order(post_feature::time.desc())
+                    .first(conn)
+                    .optional()?;
+                if previous_feature_id == Some(new_post_feature.post_id) {
+                    return Err(ApiError::AlreadyExists(ResourceProperty::PostFeature));
+                }
+
+                let insert_result = new_post_feature.insert_into(post_feature::table).execute(conn);
+                error::map_foreign_key_violation(insert_result, ResourceType::Post)?;
+                snapshot::post::feature_snapshot(conn, ctx.client, previous_feature_id, body.id)?;
+                Ok::<_, ApiError>(())
+            }
         })
         .await?;
     connection_pool
@@ -823,8 +828,11 @@ async fn merge(
     }
 
     tagging_update(&connection_pool, true, {
-        let config = Arc::clone(&ctx.config);
+        let ctx = ctx.clone();
         move |conn| {
+            verify_visibility(conn, &ctx, absorbed_id)?;
+            verify_visibility(conn, &ctx, merge_to_id)?;
+
             let absorbed_post: Post = post::table
                 .find(absorbed_id)
                 .first(conn)
@@ -838,7 +846,7 @@ async fn merge(
             api::verify_version(absorbed_post.last_edit_time, body.post_info.remove_version)?;
             api::verify_version(merge_to_post.last_edit_time, body.post_info.merge_to_version)?;
 
-            update::post::merge(conn, &config, &absorbed_post, &merge_to_post, body.replace_content)?;
+            update::post::merge(conn, &ctx.config, &absorbed_post, &merge_to_post, body.replace_content)?;
             snapshot::post::merge_snapshot(conn, ctx.client, absorbed_id, merge_to_id)?;
             Ok(())
         }
@@ -881,10 +889,15 @@ async fn favorite(
     };
 
     connection_pool
-        .transaction(move |conn| {
-            diesel::delete(post_favorite::table.find((post_id, user_id))).execute(conn)?;
-            let insert_result = new_post_favorite.insert_into(post_favorite::table).execute(conn);
-            error::map_foreign_key_violation(insert_result, ResourceType::Post)
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, post_id)?;
+
+                diesel::delete(post_favorite::table.find((post_id, user_id))).execute(conn)?;
+                let insert_result = new_post_favorite.insert_into(post_favorite::table).execute(conn);
+                error::map_foreign_key_violation(insert_result, ResourceType::Post)
+            }
         })
         .await?;
     connection_pool
@@ -922,21 +935,25 @@ async fn rate(
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
 
     connection_pool
-        .transaction(move |conn| {
-            diesel::delete(post_score::table.find((post_id, user_id))).execute(conn)?;
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, post_id)?;
 
-            if let Ok(score) = Score::try_from(*body) {
-                let insert_result = PostScore {
-                    post_id,
-                    user_id,
-                    score,
-                    time: DateTime::now(),
+                diesel::delete(post_score::table.find((post_id, user_id))).execute(conn)?;
+                if let Ok(score) = Score::try_from(*body) {
+                    let insert_result = PostScore {
+                        post_id,
+                        user_id,
+                        score,
+                        time: DateTime::now(),
+                    }
+                    .insert_into(post_score::table)
+                    .execute(conn);
+                    error::map_foreign_key_violation(insert_result, ResourceType::Post)?;
                 }
-                .insert_into(post_score::table)
-                .execute(conn);
-                error::map_foreign_key_violation(insert_result, ResourceType::Post)?;
+                Ok::<_, ApiError>(())
             }
-            Ok::<_, ApiError>(())
         })
         .await?;
     connection_pool
@@ -966,6 +983,8 @@ async fn update_impl(
     tagging_update(&connection_pool, body.tags.is_some(), {
         let ctx = ctx.clone();
         move |conn| {
+            verify_visibility(conn, &ctx, post_id)?;
+
             let old_post: Post = post::table
                 .find(post_id)
                 .first(conn)
@@ -1221,20 +1240,25 @@ async fn delete(
     }
 
     let mime_type = connection_pool
-        .transaction(move |conn| {
-            let post: Post = post::table
-                .find(post_id)
-                .first(conn)
-                .optional()?
-                .ok_or(ApiError::NotFound(ResourceType::Post))?;
-            api::verify_version(post.last_edit_time, *client_version)?;
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, post_id)?;
 
-            let mime_type = post.mime_type;
-            let post_data = SnapshotData::retrieve(conn, post)?;
-            snapshot::post::deletion_snapshot(conn, ctx.client, post_id, post_data)?;
+                let post: Post = post::table
+                    .find(post_id)
+                    .first(conn)
+                    .optional()?
+                    .ok_or(ApiError::NotFound(ResourceType::Post))?;
+                api::verify_version(post.last_edit_time, *client_version)?;
 
-            diesel::delete(post::table.find(post_id)).execute(conn)?;
-            Ok::<_, ApiError>(mime_type)
+                let mime_type = post.mime_type;
+                let post_data = SnapshotData::retrieve(conn, post)?;
+                snapshot::post::deletion_snapshot(conn, ctx.client, post_id, post_data)?;
+
+                diesel::delete(post::table.find(post_id)).execute(conn)?;
+                Ok::<_, ApiError>(mime_type)
+            }
         })
         .await?;
     if ctx.config.delete_source_files {
@@ -1268,11 +1292,21 @@ async fn unfavorite(
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
 
-    let _: i32 = diesel::delete(post_favorite::table.find((post_id, user_id)))
-        .returning(sql::<Integer>("0"))
-        .get_result(connection_pool.get().await?.as_mut())
-        .optional()?
-        .ok_or(ApiError::NotFound(ResourceType::Post))?;
+    connection_pool
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, post_id)?;
+
+                let _: i32 = diesel::delete(post_favorite::table.find((post_id, user_id)))
+                    .returning(sql::<Integer>("0"))
+                    .get_result(conn)
+                    .optional()?
+                    .ok_or(ApiError::NotFound(ResourceType::Post))?;
+                Ok::<_, ApiError>(())
+            }
+        })
+        .await?;
     connection_pool
         .transaction(move |conn| PostInfo::new_from_id(conn, &ctx, post_id, params.fields))
         .await
@@ -1835,6 +1869,13 @@ mod test {
             "post/edit_with_preferences",
         )
         .await?;
+
+        // `feature`, `favorite`, `rate`, and `unfavorite` can't be exercised the same way: they
+        // require a logged-in client, but hiding via anonymous_preferences only applies to
+        // UserRank::Anonymous, which is never logged in.
+        verify_response_with_user(UserRank::Anonymous, "PUT /post/5", "post/edit_of_blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "POST /post-merge", "post/merge_of_blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "DELETE /post/5", "post/delete_of_blacklisted").await?;
 
         reset_database();
         Ok(())
