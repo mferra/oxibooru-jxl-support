@@ -278,6 +278,12 @@ docker compose run --rm server --admin
 
 At the prompt, type a task name and press Enter. Leave the post selection blank to operate on all posts, or enter a search query to restrict the operation (e.g. a tag name like `cat`, or `type:image`).
 
+For cron/CI use, pass the task name directly to run it once, non-interactively, on all applicable posts, without entering the prompt:
+
+```sh
+./target/release/oxibooru_server --admin recompute_index
+```
+
 | Task                    | Description                                                     |
 |-------------------------|-----------------------------------------------------------------|
 | `check_integrity`       | Verify post file checksums against the database                 |

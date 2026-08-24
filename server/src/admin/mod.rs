@@ -112,18 +112,37 @@ pub fn enabled() -> bool {
     std::env::args().any(|arg| arg == "--admin")
 }
 
+/// Returns the task name passed immediately after `--admin`, if any (e.g. `--admin recompute_index`).
+/// Used to run a single task non-interactively, without entering the REPL, so admin tasks can be
+/// triggered from cron/CI. A missing or flag-like (`-`-prefixed) next argument means the REPL should
+/// be used instead, preserving the old `--admin`-only behavior.
+fn non_interactive_task_name() -> Option<String> {
+    parse_non_interactive_task_name(std::env::args())
+}
+
+fn parse_non_interactive_task_name(args: impl Iterator<Item = String>) -> Option<String> {
+    let mut args = args;
+    args.by_ref().find(|arg| arg == "--admin")?;
+    args.next().filter(|arg| !arg.starts_with('-'))
+}
+
 /// Starts server CLI.
 pub fn command_line_mode(state: &AppState) {
+    ThreadPoolBuilder::new()
+        .num_threads(app::num_rayon_threads())
+        .build_global()
+        .expect("Must be able to configure to global rayon thread pool");
+
+    if let Some(task_name) = non_interactive_task_name() {
+        run_single_task(state, &task_name);
+        return;
+    }
+
     println!("Running Oxibooru admin command line interface on {} threads.", app::num_rayon_threads());
     println!("Enter \"help\" for a list of commands, \"done\" to escape current task and \"exit\" when finished.\n");
 
     // Set up signal handlers to cancel long-running tasks
     install_signal_handlers();
-
-    ThreadPoolBuilder::new()
-        .num_threads(app::num_rayon_threads())
-        .build_global()
-        .expect("Must be able to configure to global rayon thread pool");
 
     let mut post_editor = input::create_editor();
     let mut task_editor = input::create_editor();
@@ -142,6 +161,28 @@ pub fn command_line_mode(state: &AppState) {
         }
         Ok(())
     });
+}
+
+/// Runs a single task non-interactively (operating on all applicable posts/users, as if the operator
+/// had left the selection prompt blank) and returns without entering the REPL. Reuses the same mock
+/// editors the test suite uses to skip interactive prompts.
+fn run_single_task(state: &AppState, task_name: &str) {
+    let Ok(task) = AdminTask::from_str(task_name) else {
+        let possible_arguments: Vec<&str> = AdminTask::iter().map(AdminTask::into).collect();
+        eprintln!("Unknown task \"{task_name}\". Valid tasks are {possible_arguments:?}.");
+        std::process::exit(1);
+    };
+
+    println!("Running task \"{task_name}\" non-interactively on {} threads.", app::num_rayon_threads());
+    install_signal_handlers();
+
+    let mut post_editor = mock_editor();
+    let mut user_editor: UserEditor = input::create_mock_editor();
+    run_task(state, task, &mut post_editor, &mut user_editor);
+
+    if CANCELLED.load(Ordering::SeqCst) {
+        error!("Task aborted.\n");
+    }
 }
 
 pub fn mock_editor() -> PostEditor {
@@ -233,4 +274,47 @@ fn install_signal_handlers() {
     const MESSAGE: &str = "Must be able to register signal handler";
     signal_hook::flag::register(SIGINT, CANCELLED.clone()).expect(MESSAGE);
     signal_hook::flag::register(SIGTERM, CANCELLED.clone()).expect(MESSAGE);
+}
+
+#[cfg(test)]
+mod test {
+    use super::parse_non_interactive_task_name;
+
+    fn args(values: &[&str]) -> impl Iterator<Item = String> {
+        values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>().into_iter()
+    }
+
+    #[test]
+    fn no_admin_flag() {
+        assert_eq!(parse_non_interactive_task_name(args(&["oxibooru_server"])), None);
+    }
+
+    #[test]
+    fn admin_flag_alone_uses_repl() {
+        assert_eq!(parse_non_interactive_task_name(args(&["oxibooru_server", "--admin"])), None);
+    }
+
+    #[test]
+    fn admin_flag_followed_by_another_flag_uses_repl() {
+        assert_eq!(
+            parse_non_interactive_task_name(args(&["oxibooru_server", "--admin", "--verbose"])),
+            None
+        );
+    }
+
+    #[test]
+    fn admin_flag_followed_by_task_name_is_non_interactive() {
+        assert_eq!(
+            parse_non_interactive_task_name(args(&["oxibooru_server", "--admin", "recompute_index"])),
+            Some("recompute_index".to_owned())
+        );
+    }
+
+    #[test]
+    fn task_name_recognized_regardless_of_other_argument_order() {
+        assert_eq!(
+            parse_non_interactive_task_name(args(&["oxibooru_server", "--config", "x.toml", "--admin", "recompute_index"])),
+            Some("recompute_index".to_owned())
+        );
+    }
 }
