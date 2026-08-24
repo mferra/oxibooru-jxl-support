@@ -214,23 +214,28 @@ async fn update(
     let edit_own = ctx.config.privileges()[Action::CommentEditOwn];
     let edit_any = ctx.config.privileges()[Action::CommentEditAny];
     connection_pool
-        .transaction(move |conn| {
-            let (comment_owner, comment_version): (Option<i64>, DateTime) = comment::table
-                .find(comment_id)
-                .select((comment::user_id, comment::last_edit_time))
-                .first(conn)
-                .optional()?
-                .ok_or(ApiError::NotFound(ResourceType::Comment))?;
-            api::verify_version(comment_version, body.version)?;
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, comment_id)?;
 
-            let client_owns_comment = client.id == comment_owner && comment_owner.is_some();
-            let required_rank = if client_owns_comment { edit_own } else { edit_any };
-            api::verify_privilege(client, required_rank)?;
+                let (comment_owner, comment_version): (Option<i64>, DateTime) = comment::table
+                    .find(comment_id)
+                    .select((comment::user_id, comment::last_edit_time))
+                    .first(conn)
+                    .optional()?
+                    .ok_or(ApiError::NotFound(ResourceType::Comment))?;
+                api::verify_version(comment_version, body.version)?;
 
-            diesel::update(comment::table.find(comment_id))
-                .set((comment::text.eq(body.text), comment::last_edit_time.eq(DateTime::now())))
-                .execute(conn)
-                .map_err(ApiError::from)
+                let client_owns_comment = client.id == comment_owner && comment_owner.is_some();
+                let required_rank = if client_owns_comment { edit_own } else { edit_any };
+                api::verify_privilege(client, required_rank)?;
+
+                diesel::update(comment::table.find(comment_id))
+                    .set((comment::text.eq(body.text), comment::last_edit_time.eq(DateTime::now())))
+                    .execute(conn)
+                    .map_err(ApiError::from)
+            }
         })
         .await?;
     connection_pool
@@ -269,20 +274,24 @@ async fn rate(
 
     let user_id = ctx.client.id.ok_or(ApiError::NotLoggedIn)?;
     connection_pool
-        .transaction(move |conn| {
-            diesel::delete(comment_score::table.find((comment_id, user_id))).execute(conn)?;
+        .transaction({
+            let ctx = ctx.clone();
+            move |conn| {
+                verify_visibility(conn, &ctx, comment_id)?;
 
-            if let Ok(score) = Score::try_from(*body) {
-                let insert_result = NewCommentScore {
-                    comment_id,
-                    user_id,
-                    score,
+                diesel::delete(comment_score::table.find((comment_id, user_id))).execute(conn)?;
+                if let Ok(score) = Score::try_from(*body) {
+                    let insert_result = NewCommentScore {
+                        comment_id,
+                        user_id,
+                        score,
+                    }
+                    .insert_into(comment_score::table)
+                    .execute(conn);
+                    error::map_foreign_key_violation(insert_result, ResourceType::Comment)?;
                 }
-                .insert_into(comment_score::table)
-                .execute(conn);
-                error::map_foreign_key_violation(insert_result, ResourceType::Comment)?;
+                Ok::<_, ApiError>(())
             }
-            Ok::<_, ApiError>(())
         })
         .await?;
     connection_pool
@@ -314,6 +323,8 @@ async fn delete(
 ) -> ApiResult<Json<()>> {
     connection_pool
         .transaction(move |conn| {
+            verify_visibility(conn, &ctx, comment_id)?;
+
             let (comment_owner, comment_version): (Option<i64>, DateTime) = comment::table
                 .find(comment_id)
                 .select((comment::user_id, comment::last_edit_time))
@@ -536,7 +547,11 @@ mod test {
             "comment/list_with_preferences",
         )
         .await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /comment/1", "comment/get_with_preferences").await
+        verify_response_with_user(UserRank::Anonymous, "GET /comment/1", "comment/get_with_preferences").await?;
+        verify_response_with_user(UserRank::Anonymous, "PUT /comment/1", "comment/edit_of_blacklisted").await?;
+        // `rate` can't be exercised the same way: it requires a logged-in client, but hiding via
+        // anonymous_preferences only applies to UserRank::Anonymous, which is never logged in.
+        verify_response_with_user(UserRank::Anonymous, "DELETE /comment/1", "comment/delete_of_blacklisted").await
     }
 
     #[tokio::test]
