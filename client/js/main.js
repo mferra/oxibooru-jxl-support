@@ -20,6 +20,10 @@ const misc = require("./util/misc.js");
 const views = require("./util/views.js");
 const router = require("./router.js");
 
+// Constructs and renders the persistent top navigation bar as a side effect of being
+// required. Not a route controller, so it isn't part of the `controllers` array below.
+require("./controllers/top_navigation_controller.js");
+
 history.scrollRestoration = "manual";
 
 router.exit(null, (ctx, next) => {

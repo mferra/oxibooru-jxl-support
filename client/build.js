@@ -20,16 +20,6 @@ const webapp_splash_screens = [
     { w: 2048, h: 2732, center: 1024 }
 ];
 
-const external_js = [
-    'dompurify',
-    'js-cookie',
-    'marked',
-    'mousetrap',
-    'nprogress',
-    'superagent',
-    'underscore',
-];
-
 const app_manifest = {
     name: 'oxibooru',
     icons: [
@@ -57,7 +47,7 @@ const glob = require('glob');
 const path = require('path');
 const util = require('util');
 const execSync = require('child_process').execSync;
-const browserify = require('browserify');
+const esbuild = require('esbuild');
 const chokidar = require('chokidar');
 const WebSocket = require('ws');
 var PrettyError = require('pretty-error');
@@ -80,7 +70,6 @@ function baseUrl() {
 
 function bundleHtml() {
     const underscore = require('underscore');
-    const babelify = require('babelify');
 
     function minifyHtml(html) {
         return require('html-minifier').minify(html, {
@@ -153,65 +142,32 @@ function bundleCss() {
     console.info('Bundled CSS');
 }
 
-function minifyJs(path) {
-    return require('terser').minify(
-        fs.readFileSync(path, 'utf-8'), { compress: { unused: false } }).code;
-}
+const appJsFile = './public/js/app.min.js';
 
-function writeJsBundle(b, path, compress, callback) {
-    let outputFile = fs.createWriteStream(path);
-    b.bundle().on('error', (e) => console.error(pe.render(e))).pipe(outputFile);
-    outputFile.on('finish', () => {
-        if (compress) {
-            fs.writeFileSync(path, minifyJs(path));
-        }
-        callback();
-    });
-}
-
-function bundleVendorJs(compress) {
-    let b = browserify();
-    for (let lib of external_js) {
-        b.require(lib);
-    }
-    if (!process.argv.includes('--no-transpile')) {
-        b.add(require.resolve('babel-polyfill'));
-    }
-    const file = './public/js/vendor.min.js';
-    writeJsBundle(b, file, compress, () => {
-        if (process.argv.includes('--gzip')) {
-            gzipFile(file);
-        }
-        console.info('Bundled vendor JS');
-    });
-}
-
-function bundleAppJs(b, compress, callback) {
-    const file = './public/js/app.min.js';
-    writeJsBundle(b, file, compress, () => {
-        if (process.argv.includes('--gzip')) {
-            gzipFile(file);
-        }
-        console.info('Bundled app JS');
-        callback();
-    });
+function esbuildOptions(compress) {
+    return {
+        entryPoints: ['./js/main.js'],
+        bundle: true,
+        outfile: appJsFile,
+        minify: compress,
+        sourcemap: process.argv.includes('--debug'),
+        target: 'es2020',
+        logLevel: 'warning',
+    };
 }
 
 function bundleJs() {
-    if (!process.argv.includes('--no-vendor-js')) {
-        bundleVendorJs(true);
+    const compress = !process.argv.includes('--debug');
+    try {
+        esbuild.buildSync(esbuildOptions(compress));
+    } catch (e) {
+        console.error(pe.render(e));
+        return;
     }
-
-    if (!process.argv.includes('--no-app-js')) {
-        let watchify = require('watchify');
-        let b = browserify({ debug: process.argv.includes('--debug') });
-        if (!process.argv.includes('--no-transpile')) {
-            b = b.transform('babelify');
-        }
-        b = b.external(external_js).add(glob.sync('./js/**/*.js'));
-        const compress = !process.argv.includes('--debug');
-        bundleAppJs(b, compress, () => { });
+    if (process.argv.includes('--gzip')) {
+        gzipFile(appJsFile);
     }
+    console.info('Bundled app JS');
 }
 
 const environment = process.argv.includes('--watch') ? "development" : "production";
@@ -366,36 +322,29 @@ function watch() {
     bundleCss();
     bundleHtml();
 
-    bundleVendorJs(true);
-
-    let watchify = require('watchify');
-    let b = browserify({
-        debug: process.argv.includes('--debug'),
-        entries: ['js/main.js'],
-        cache: {},
-        packageCache: {},
-    });
-
-    b.plugin(watchify);
-
-    if (!process.argv.includes('--no-transpile')) {
-        b = b.transform('babelify');
-    }
-    b = b.external(external_js).add(glob.sync('./js/**/*.js'));
-    const compress = false;
-
-    function bundle(id) {
-        console.info("Rebundling app JS...");
-        let start = new Date();
-        bundleAppJs(b, compress, () => {
-            let end = new Date() - start;
-            console.info('Rebundled in %ds.', end / 1000)
-            emitReload();
-        });
-    }
-
-    b.on('update', bundle);
-    bundle();
+    esbuild.context({
+        ...esbuildOptions(false),
+        logLevel: 'info',
+        plugins: [{
+            name: 'reload-on-rebuild',
+            setup(build) {
+                let start;
+                build.onStart(() => {
+                    start = new Date();
+                    console.info('Rebundling app JS...');
+                });
+                build.onEnd((result) => {
+                    if (result.errors.length === 0) {
+                        console.info('Rebundled in %ds.', (new Date() - start) / 1000);
+                        if (process.argv.includes('--gzip')) {
+                            gzipFile(appJsFile);
+                        }
+                        emitReload();
+                    }
+                });
+            },
+        }],
+    }).then((ctx) => ctx.watch());
 }
 
 // -------------------------------------------------
