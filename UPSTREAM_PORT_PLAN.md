@@ -35,7 +35,7 @@ on `main`, in priority order below. After each port:
 | 5 | **DONE** (2026-08-23) | `1fadaee0` | File-move errors were silently swallowed | `filesystem.rs` | Confirmed real bug: `move_file` pattern-matched only `ErrorKind::CrossesDevices` on the mapped error, so every other rename failure (permission denied, disk full, etc.) fell through silently and execution continued as if the move succeeded. Fixing this surfaced a **pre-existing latent bug in the test fixture setup**: `swap_posts` assumes generated thumbnails always exist on disk (true in production), but `test.rs`'s `create_posts` never created one, so `api::post::test::merge` started failing once the real error was no longer swallowed. Ported upstream's matching test-fixture fix (copy the source media to `generated_thumbnail_path` too) — this is exactly why upstream bundled that same change into this commit |
 | — | no action needed | `571790bb` (upstream) vs `5f960a05`/`ec16b4a2`/`dc24d882` (ours) | SSRF hardening on `content/download.rs` | `content/download.rs` | Both sides independently hardened this file; ours looks at least as thorough. Flagged only as a merge-conflict hotspot below, not a missing fix |
 | 7 | **DONE** (2026-08-24) | `2c00f3c2`, `f72a108b` (+ `fc365f13`) | Mobile swipe/scroll fix on the post view; correct custom-thumbnail removal (client + server) | `client/js/util/touch.js`, `client/css/post-main-view.styl`, `client/js/controllers/post_main_controller.js`, `client/js/controls/post_edit_sidebar_control.js`, `client/js/models/post.js`, `server/src/api/post.rs`, `server/src/update/post.rs` | `2c00f3c2` (edge-detection so horizontal swipe-nav doesn't fight a horizontally-scrolled post container) ported directly. `f72a108b` (client "remove thumbnail" now sends an explicit `null` vs. omitting the field) was a no-op on its own — `main`'s `PostUpdateBody.thumbnail_token` was a single `Option`, collapsing "absent" and "null" to the same `None`. Required also porting the relevant part of `fc365f13` (double-`Option` + `remove_custom_thumbnail`), adapted to `main`'s diverged `post.rs`/`update/post.rs`. Skipped `fc365f13`'s `admin/database.rs` hunk — confirmed via direct before/after diff it's a pure cosmetic reordering, no functional difference, not worth the diff noise against `main`'s own divergence there. Also fixed a real pre-existing bug surfaced while adding thumbnail-upload test coverage: `update::post::thumbnail()`'s direct diesel writes to `*_thumbnail_size` were being silently clobbered by the later unconditional `new_post.save_changes(conn)` (which rewrites every `Post` column from the stale in-memory struct) — fixed by returning the written size and assigning it back onto `new_post` before `save_changes`. Verified via podman (`cargo check`/`clippy` clean vs. baseline, 115/115 tests). Committed as `5719c078` (touch/scroll) and `56f25e84` (thumbnail removal) |
-| 8 | **PENDING — reviewed only, not yet ported** | `8e36712a` | Missing `verify_visibility` (blacklist/preferences) checks on mutation endpoints that echo the resource back in the response | `server/src/api/comment.rs`, `server/src/api/post.rs`, `server/src/api/tag.rs`, `server/src/api/tag_category.rs` | User asked to review only ("revisá"), not port. Confirmed real and non-cosmetic: `verify_visibility` is currently applied only to `get`-style reads (e.g. `main`'s `comment.rs:122`), not to `update`/`rate`/`delete` (comments) or `feature`/`merge`/`update` (posts, tags, tag categories) — same shape of leak as item #6 (a restricted/blacklisted resource's state can be read back via a mutating request's response) but for visibility/blacklist preferences rather than rank-based view privileges. ~450 lines in upstream's diff across the 4 files. Recommend scoping as its own dedicated port item, split into per-file sub-items the way item #6 was (6a-6g), when the user asks to proceed |
+| 8 | **DONE** (2026-08-24), split into sub-items 8a-8d | `8e36712a` | Missing `verify_visibility` (blacklist/preferences) checks on mutation endpoints that echo the resource back in the response | `server/src/api/comment.rs`, `server/src/api/post.rs`, `server/src/api/tag.rs`, `server/src/api/tag_category.rs` | Same shape of leak as item #6 (a restricted/blacklisted resource's state can be read back via a mutating request's response) but for visibility/blacklist preferences rather than rank-based view privileges. See "Item #8" section below for the sub-item breakdown |
 
 ## Item #6 — missing view-privilege checks (IN PROGRESS, split into sub-items below)
 
@@ -103,6 +103,58 @@ clean, `cargo clippy --all-targets` matching the established 36 bin / 40 test wa
 no new warnings across ~13 touched files, and a full `cargo test -- --test-threads=4` run). First test run
 surfaced the `tag/get_siblings_*` fixture gap described in the 6d row above; after fixing both fixtures, a
 second full run passed 115/115. Container destroyed after (`stop`/`rm -f`/`rmi -f`/`system prune -f`).
+
+## Item #8 — missing visibility (blacklist/preferences) checks on mutation endpoints (DONE, split into sub-items below)
+
+**Upstream commit:** `8e36712a` ("Preferences are now applied on edit and delete operations").
+**Confirmed against `main` directly:** `verify_visibility`/blacklist-hiding helpers already exist in
+`comment.rs`, `tag.rs`, `tag_category.rs`, and `post.rs` (each resource already applies its check to
+`get`/`get_siblings`/`get_neighbors`), but are missing from every mutation endpoint that echoes the
+resource back in its response (`update`/`rate`/`delete` for comments; `merge`/`update`/`delete` for tags;
+`update`/`set_default`/`delete` for tag categories; `feature`/`merge`/`favorite`/`rate`/`update`/`delete`/
+`unfavorite` for posts). **Bug:** a rank/privilege-restricted client can still read back a
+blacklisted/hidden resource's state by sending a no-op edit, rate, or delete request and inspecting the
+response, bypassing the same-shaped protection item #6 added for rank-based view privileges.
+
+**Not a copy of upstream's diff** — `main` already diverged from upstream's pre-patch code in several of
+these functions (own `merge`/`unfavorite`/`update_impl` implementations, `tagging_update` helper not
+present upstream, double-`Option` thumbnail handling from item #7). Each sub-item below applies the same
+*pattern* (call `verify_visibility`/equivalent at the top of the mutating transaction, before any state is
+read or changed) adapted to `main`'s current code, not a line-for-line port.
+
+**`main`'s own extra gap found while scoping this** (not present in upstream, so not part of `8e36712a`'s
+diff): `post.rs`'s `unfavorite` is a diverged, simpler implementation than upstream's (single direct
+`diesel::delete` + `returning`, no transaction closure) and has **no** `verify_visibility` call at all —
+upstream's own `unfavorite` already had it before `8e36712a` (confirmed via `git show 8e36712a^`). Include
+this fix in sub-item 8d alongside the others.
+
+**Sub-items — each independently committable, do in this order (foundational → simple → most-diverged):**
+
+| Sub-item | Status | Files | Functions | Notes |
+|---|---|---|---|---|
+| 8a | **DONE** (2026-08-24) | `api/comment.rs` | `update`, `rate`, `delete` | Added `verify_visibility(conn, &ctx, comment_id)?` at the top of each mutating transaction closure. `delete`'s closure already captured `ctx` by move; `update`/`rate` needed `let ctx = ctx.clone();` moved into the transaction, since `ctx` is still needed after for the trailing `CommentInfo::new_from_id` call. Added `comment/edit_of_blacklisted` and `comment/delete_of_blacklisted` fixtures/tests |
+| 8b | **DONE** (2026-08-24) | `api/tag.rs` | `merge`, `update`, `delete` | `verify_visibility` already returns `tag_id` in `main`. `merge`'s local `get_tag_info` closure gained a `ctx: &Context` param, calling `verify_visibility` to get `tag_id` then looking up `last_edit_time` by id. `update`/`delete` call `verify_visibility` first, then look up by `tag::table.find(tag_id)` instead of by name+join. Dropped the now-unused top-level `SelectableHelper` import (matches upstream's own identical import cleanup in `8e36712a`, confirmed by the diff). Added `tag/edit_of_blacklisted`, `tag/merge_of_blacklisted`, `tag/delete_of_blacklisted` fixtures/tests |
+| 8c | **DONE** (2026-08-24) | `api/tag_category.rs` | `update`, `set_default`, `delete` | `verify_visibility` already returns the full `TagCategory` in `main`. Replaced each function's manual `tag_category::table.filter(tag_category::name.eq(name)).first(conn)...` lookup with `verify_visibility(conn, &ctx, &name)?`. Added `tag_category/edit_of_blacklisted`, `tag_category/set_default_of_blacklisted`, `tag_category/delete_of_blacklisted` fixtures/tests |
+| 8d | **DONE** (2026-08-24) | `api/post.rs` | `feature`, `merge`, `favorite`, `rate`, `update_impl`, `delete`, `unfavorite` | `feature`/`favorite`/`rate`/`delete` needed `let ctx = ctx.clone();` added to their transaction closures. `merge`'s `tagging_update` closure changed from `let config = Arc::clone(&ctx.config)` to `let ctx = ctx.clone();` (`Arc` import still used elsewhere in the file, kept). `update_impl`'s closure already captured `ctx` by clone — just added the `verify_visibility` call at the top. `unfavorite` (our own extra gap, see above) was converted from its direct non-transactional `diesel::delete(...).returning(...).get_result(...)` into a `connection_pool.transaction(...)` closure so `verify_visibility` runs first, matching `favorite`/`rate`. Added `post/edit_of_blacklisted`, `post/merge_of_blacklisted`, `post/delete_of_blacklisted` fixtures/tests |
+
+**Key limitation discovered while writing tests:** `main`'s blacklist-hiding (`anonymous_preferences`) only
+applies to `UserRank::Anonymous`, and the test harness's `UserRank::Anonymous` is always unauthenticated
+(no `ctx.client.id`). Upstream supports *per-rank* preferences (its `blacklisted` test rates a hidden
+comment as `UserRank::Regular`), which `main` never ported. As a result, endpoints that require a logged-in
+client (`rate` for comments; `feature`/`favorite`/`rate`/`unfavorite` for posts) always hit `NotLoggedIn`
+before reaching the new `verify_visibility` call when tested as Anonymous, so those specific call sites
+could not get fixture-backed test coverage in this pass — the code fix is still correct and in place
+(matches the pattern applied to every sibling function, and defends a real gap if `main` ever gains
+per-rank preferences or an admin-demoted logged-in "Anonymous" account), just untested. Documented inline
+in each `preferences()` test with a comment explaining the gap.
+
+**Verification (2026-08-24):** all four sub-items implemented and verified together in one podman
+container (`cargo check` clean after removing the one now-unused `tag.rs` import; `cargo clippy
+--all-targets` matching the established 36 bin / 40 test warning baseline exactly; `cargo test --
+--test-threads=4` hit unrelated database-contention flakiness — `"__test" is being accessed by other
+users"` — across ~80 unrelated tests, not caused by these changes; a rerun with `--test-threads=2` passed
+115/115 cleanly, including all four `preferences()` tests carrying the new fixtures). Container destroyed
+after (`stop`/`rm -f`/`rmi -f`/`system prune -f`).
 
 ## Known merge-conflict hotspots
 
