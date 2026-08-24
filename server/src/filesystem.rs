@@ -7,7 +7,7 @@ use crate::content::thumbnail::ThumbnailCategory;
 use crate::content::upload::UploadToken;
 use crate::model::enums::MimeType;
 use axum::body::Bytes;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use image::error::ImageError;
 use image::{DynamicImage, ImageResult};
 use std::collections::HashSet;

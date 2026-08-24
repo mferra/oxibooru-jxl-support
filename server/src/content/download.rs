@@ -4,7 +4,7 @@ use crate::config::Action;
 use crate::content::upload::{MAX_UPLOAD_SIZE, UploadToken};
 use crate::filesystem;
 use axum::body::Bytes;
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, LOCATION, REFERER};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
