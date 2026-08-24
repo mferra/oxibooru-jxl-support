@@ -106,10 +106,6 @@ class Post extends events.EventTarget {
         return this._flags;
     }
 
-    get description() {
-        return this._description;
-    }
-
     get tags() {
         return this._tags;
     }
@@ -558,7 +554,6 @@ class Post extends events.EventTarget {
             _fileSize: response.fileSize,
 
             _flags: [...(response.flags || [])],
-            _description: response.description,
             _relations: [...(response.relations || [])],
 
             _score: response.score,
