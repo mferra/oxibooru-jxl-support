@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use swf::Tag;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Infers a [`MimeType`] from the magic bytes at the start of a file's contents,
 /// rather than trusting a client-supplied extension or `Content-Type` header.
@@ -434,7 +434,7 @@ fn flash_image(config: &Config, path: &Path) -> ApiResult<Option<DynamicImage>> 
 /// defers to the mime type.
 pub fn detect_post_type(file_path: &Path, mime_type: MimeType) -> ApiResult<PostType> {
     let is_animated = match mime_type {
-        MimeType::Avif => Some(avif_is_animated(file_path)?),
+        MimeType::Avif => Some(avif_is_animated(file_path)),
         MimeType::Gif => Some(gif_is_animated(file_path)?),
         _ => None,
     };
@@ -457,49 +457,60 @@ fn gif_is_animated(path: &Path) -> ApiResult<bool> {
 }
 
 /// Uses `FFmpeg` to determine if the AVIF at `path` contains more than one frame.
-fn avif_is_animated(path: &Path) -> ApiResult<bool> {
+///
+/// Each video stream is decoded to 1x1 RGB frames, so the frame count is simply the number of
+/// bytes `FFmpeg` writes divided by three. Counting bytes instead of parsed events keeps this
+/// honest on files whose stream description [`ffmpeg_sidecar`] cannot parse, where it would
+/// otherwise see no frames at all and call an animation still.
+///
+/// Every stream has to be checked, not just the first: an animated AVIF typically carries its
+/// still preview as stream 0 and the animation as stream 1.
+fn avif_is_animated(path: &Path) -> bool {
+    /// A 1x1 RGB frame.
+    const BYTES_PER_FRAME: usize = 3;
+    /// The loop stops at the first stream index that doesn't exist; this only bounds a
+    /// pathological file that reports arbitrarily many.
+    const MAX_VIDEO_STREAMS: u32 = 16;
+
     let path_str = path.to_string_lossy();
-    let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
-    command.input(&path_str);
-
-    let description = format!("counting the video streams of {}", path.display());
-    let video_stream_count = run_ffmpeg(&description, &mut command, 0usize, |count, event| {
-        if let FfmpegEvent::ParsedInputStream(stream) = event
-            && stream.is_video()
-        {
-            *count += 1;
-        }
-    })?
-    .state;
-
-    for stream_index in 0..video_stream_count {
-        let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
-        command
-            .input(&path_str)
-            .args([
+    for stream_index in 0..MAX_VIDEO_STREAMS {
+        let map = format!("0:v:{stream_index}");
+        let description = format!("checking stream {stream_index} of {} for animation", path.display());
+        let output = ffmpeg::run(
+            &description,
+            &[
+                "-i",
+                &path_str,
                 "-map",
-                &format!("0:v:{stream_index}"),
+                &map,
                 "-frames:v",
                 "2",
                 "-vf",
                 "scale=1:1:flags=neighbor",
-            ])
-            .rawvideo();
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            *FFMPEG_TIMEOUT,
+        );
 
-        let description = format!("checking stream {stream_index} of {} for animation", path.display());
-        let run = run_ffmpeg(&description, &mut command, 0u32, |frames, event| {
-            if let FfmpegEvent::OutputFrame(_) = event {
-                *frames += 1;
+        match output {
+            Ok(output) if output.stdout.len() > BYTES_PER_FRAME => return true,
+            Ok(_) => {}
+            // Asking for a stream past the last one is how this loop ends, so a failure is
+            // only worth mentioning for the first stream. Even then it isn't fatal: the image
+            // crate may still decode the file, so fall back to treating it as a still.
+            Err(err) => {
+                if stream_index == 0 {
+                    warn!("Cannot check {} for animation, assuming it is still: {err}", path.display());
+                }
+                break;
             }
-        })?;
-
-        if run.state > 1 {
-            return Ok(true);
-        } else if run.state == 0 && !run.errors.is_empty() {
-            return Err(ApiError::FfmpegError(run.errors.join("; ").into()));
         }
     }
-    Ok(false)
+    false
 }
 
 /// Returns maximum decoded image size.
