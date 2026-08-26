@@ -45,7 +45,8 @@ impl From<String> for AdminError {
 impl From<PoolError> for AdminError {
     fn from(value: PoolError) -> Self {
         Self::Error(format!(
-            "Could not get a database connection: {value}. Check that the database is running and reachable."
+            "Could not get a database connection: {value}. Check that the database is running, reachable, \
+             and that its max_connections is high enough for the server and this task."
         ))
     }
 }

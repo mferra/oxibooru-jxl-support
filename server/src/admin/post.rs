@@ -20,7 +20,7 @@ use crate::time::{DateTime, Timer};
 use crate::{admin, snapshot, update};
 use diesel::dsl::exists;
 use diesel::{
-    Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl,
+    Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, QueryResult, RunQueryDsl,
     SelectableHelper,
 };
 use image::{DynamicImage, GenericImageView};
@@ -39,9 +39,10 @@ pub fn check_integrity(state: &AppState, editor: &mut PostEditor) {
         let _timer = Timer::new("check_integrity");
         let progress = ProgressReporter::new("Posts checked", PRINT_INTERVAL);
         let failures = ProgressReporter::new("Integrity checks failed", None);
-        post_ids
-            .into_par_iter()
-            .try_for_each(|post_id| check_integrity_in_parallel(state, post_id, &progress, &failures))?;
+        let metadata = post_checksums(state, &post_ids)?;
+        metadata.into_par_iter().try_for_each(|(post_id, mime_type, checksum)| {
+            check_integrity_in_parallel(state, post_id, mime_type, &checksum, &progress, &failures)
+        })?;
         failures.report();
         Ok(())
     });
@@ -56,9 +57,10 @@ pub fn recompute_checksums(state: &AppState, editor: &mut PostEditor) {
         let _timer = Timer::new("recompute_checksums");
         let progress = ProgressReporter::new("Checksums computed", PRINT_INTERVAL);
         let duplicate_count = ProgressReporter::new("Duplicates found", PRINT_INTERVAL);
-        post_ids
-            .into_par_iter()
-            .try_for_each(|post_id| recompute_checksum_in_parallel(state, post_id, &progress, &duplicate_count))?;
+        let metadata = post_mime_types(state, &post_ids)?;
+        metadata.into_par_iter().try_for_each(|(post_id, mime_type)| {
+            recompute_checksum_in_parallel(state, post_id, mime_type, &progress, &duplicate_count)
+        })?;
         duplicate_count.report();
         Ok(())
     });
@@ -79,9 +81,10 @@ pub fn recompute_signatures(state: &AppState, editor: &mut PostEditor) {
 
         let _timer = Timer::new("recompute_signatures");
         let progress = ProgressReporter::new("Signatures computed", PRINT_INTERVAL);
-        post_ids
+        let metadata = post_mime_types(state, &post_ids)?;
+        metadata
             .into_par_iter()
-            .try_for_each(|post_id| recompute_signature_in_parallel(state, post_id, &progress))
+            .try_for_each(|(post_id, mime_type)| recompute_signature_in_parallel(state, post_id, mime_type, &progress))
     });
 }
 
@@ -111,9 +114,10 @@ pub fn recompute_post_types(state: &AppState, editor: &mut PostEditor) {
 
         let _timer = Timer::new("recompute_post_types");
         let progress = ProgressReporter::new("Post types computed", PRINT_INTERVAL);
-        post_ids
+        let metadata = post_mime_types(state, &post_ids)?;
+        metadata
             .into_par_iter()
-            .try_for_each(|post_id| recompute_post_type_in_parallel(state, post_id, &progress))
+            .try_for_each(|(post_id, mime_type)| recompute_post_type_in_parallel(state, post_id, mime_type, &progress))
     });
 }
 
@@ -123,35 +127,25 @@ pub fn regenerate_thumbnails(state: &AppState, editor: &mut PostEditor) {
 
         let _timer = Timer::new("regenerate_thumbnails");
         let progress = ProgressReporter::new("Thumbnails regenerated", PRINT_INTERVAL);
-        post_ids
+        let metadata = post_mime_types(state, &post_ids)?;
+        metadata
             .into_par_iter()
-            .try_for_each(|post_id| regenerate_thumbnail_in_parallel(state, post_id, &progress))
+            .try_for_each(|(post_id, mime_type)| regenerate_thumbnail_in_parallel(state, post_id, mime_type, &progress))
     });
 }
 
 /// Checks content integrity for post with id `post_id`. Designed to operate in a parallel iterator.
+///
+/// Needs no database connection: the stored checksum is passed in from the bulk metadata query.
 fn check_integrity_in_parallel(
     state: &AppState,
     post_id: i64,
+    mime_type: MimeType,
+    checksum: &Checksum,
     progress: &ProgressReporter,
     failures: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let (mime_type, checksum): (MimeType, Checksum) = match post::table
-        .find(post_id)
-        .select((post::mime_type, post::checksum))
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(metadata)) => metadata,
-        Ok(None) => return Ok(()), // Post must have been deleted after starting task, skip
-        Err(err) => {
-            error!("Cannot retrieve metadata for post {post_id} for reason: {err}");
-            return Ok(());
-        }
-    };
 
     let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
     let file_checksum = match hash::compute_checksums(&content_path) {
@@ -162,7 +156,7 @@ fn check_integrity_in_parallel(
         }
     };
 
-    if checksum != file_checksum {
+    if *checksum != file_checksum {
         warn!(
             "Post {post_id} failed integrity check (file: {}). \
              The file may have been corrupted or silently modified.",
@@ -209,23 +203,13 @@ fn recompute_index_in_parallel(state: &AppState, post_id: i64, progress: &Progre
 }
 
 /// Recomputes post type for post with id `post_id`. Designed to operate in a parallel iterator.
-fn recompute_post_type_in_parallel(state: &AppState, post_id: i64, progress: &ProgressReporter) -> AdminResult<()> {
+fn recompute_post_type_in_parallel(
+    state: &AppState,
+    post_id: i64,
+    mime_type: MimeType,
+    progress: &ProgressReporter,
+) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let mime_type: MimeType = match post::table
-        .find(post_id)
-        .select(post::mime_type)
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(mime_type)) => mime_type,
-        Ok(None) => return Ok(()), // Post must have been deleted after starting task, skip
-        Err(err) => {
-            error!("Cannot retrieve MIME type for post {post_id} for reason: {err}");
-            return Ok(());
-        }
-    };
 
     let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
     let is_animated_webp = mime_type == MimeType::Webp && transcode::webp_is_animated(&content_path);
@@ -241,6 +225,7 @@ fn recompute_post_type_in_parallel(state: &AppState, post_id: i64, progress: &Pr
         }
     };
 
+    let mut conn = state.connection_pool.get_blocking()?;
     match diesel::update(post::table.find(post_id))
         .set(post::type_.eq(post_type))
         .execute(&mut conn)
@@ -255,25 +240,11 @@ fn recompute_post_type_in_parallel(state: &AppState, post_id: i64, progress: &Pr
 fn recompute_checksum_in_parallel(
     state: &AppState,
     post_id: i64,
+    mime_type: MimeType,
     progress: &ProgressReporter,
     duplicate_count: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let mime_type = match post::table
-        .find(post_id)
-        .select(post::mime_type)
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(mime_type)) => mime_type,
-        Ok(None) => return Ok(()), // Post must have been deleted after starting task, skip
-        Err(err) => {
-            error!("Cannot retrieve MIME type for post {post_id} for reason: {err}");
-            return Ok(());
-        }
-    };
 
     let image_path = PostHash::new(&state.config, post_id).content_path(mime_type);
     let (checksum, md5_checksum) = match hash::compute_checksums(&image_path) {
@@ -284,6 +255,8 @@ fn recompute_checksum_in_parallel(
         }
     };
 
+    // Only now, with the file hashed, is a connection needed.
+    let mut conn = state.connection_pool.get_blocking()?;
     let duplicate: Option<i64> = match post::table
         .select(post::id)
         .filter(post::checksum.eq(&checksum))
@@ -318,23 +291,13 @@ fn recompute_checksum_in_parallel(
 }
 
 /// Recomputes signature for post with id `post_id`. Designed to operate in a parallel iterator.
-fn recompute_signature_in_parallel(state: &AppState, post_id: i64, progress: &ProgressReporter) -> AdminResult<()> {
+fn recompute_signature_in_parallel(
+    state: &AppState,
+    post_id: i64,
+    mime_type: MimeType,
+    progress: &ProgressReporter,
+) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let mime_type = match post::table
-        .find(post_id)
-        .select(post::mime_type)
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(mime_type)) => mime_type,
-        Ok(None) => return Ok(()), // Post must have been deleted after starting task, skip
-        Err(err) => {
-            error!("Cannot retrieve MIME type for post {post_id} for reason: {err}");
-            return Ok(());
-        }
-    };
 
     let content_path = PostHash::new(&state.config, post_id).content_path(mime_type);
     let image = match decode::representative_image(&state.config, &content_path, mime_type) {
@@ -350,6 +313,9 @@ fn recompute_signature_in_parallel(state: &AppState, post_id: i64, progress: &Pr
 
     let image_signature = signature::compute(&image);
     let signature_indexes = signature::generate_indexes(&image_signature);
+
+    // Only now, with the image decoded and its signature computed, is a connection needed.
+    let mut conn = state.connection_pool.get_blocking()?;
     let transaction_result = conn.transaction(|conn| {
         // Post may have been deleted, so make sure it still exists first
         let post_exists: bool = diesel::select(exists(post::table.find(post_id))).first(conn)?;
@@ -383,24 +349,18 @@ fn recompute_signature_in_parallel(state: &AppState, post_id: i64, progress: &Pr
     Ok(())
 }
 
-/// Regenerates thumbnail for post with id `post_id`. Designed to operate in a parallel iterator.
-fn regenerate_thumbnail_in_parallel(state: &AppState, post_id: i64, progress: &ProgressReporter) -> AdminResult<()> {
+/// Regenerates the thumbnail of post `post_id`. Designed to operate in a parallel iterator.
+///
+/// A database connection is only checked out for the final update, never while decoding or
+/// encoding, because a connection held across image work keeps the whole pool busy for as
+/// long as the slowest decode takes.
+fn regenerate_thumbnail_in_parallel(
+    state: &AppState,
+    post_id: i64,
+    mime_type: MimeType,
+    progress: &ProgressReporter,
+) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let mime_type = match post::table
-        .find(post_id)
-        .select(post::mime_type)
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(mime_type)) => mime_type,
-        Ok(None) => return Ok(()), // Post must have been deleted after starting task, skip
-        Err(err) => {
-            error!("Cannot retrieve MIME type for post {post_id} for reason: {err}");
-            return Ok(());
-        }
-    };
 
     let post_hash = PostHash::new(&state.config, post_id);
     let content_path = post_hash.content_path(mime_type);
@@ -411,6 +371,8 @@ fn regenerate_thumbnail_in_parallel(state: &AppState, post_id: i64, progress: &P
             return Ok(());
         }
     };
+
+    let mut conn = state.connection_pool.get_blocking()?;
     if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumbnail, ThumbnailCategory::Generated) {
         error!("Cannot save thumbnail for post {post_id} for reason: {err}");
     } else {
@@ -435,9 +397,10 @@ pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
         let converted = ProgressReporter::new("Posts converted to JXL", PRINT_INTERVAL);
         let skipped = ProgressReporter::new("Posts skipped", None);
         let failed = ProgressReporter::new("Posts failed", None);
-        post_ids
-            .into_par_iter()
-            .try_for_each(|post_id| convert_post_to_jxl_in_parallel(state, post_id, &converted, &skipped, &failed))?;
+        let metadata = post_phashes(state, &post_ids)?;
+        metadata.into_par_iter().try_for_each(|(post_id, mime_type, existing_phash)| {
+            convert_post_to_jxl_in_parallel(state, post_id, mime_type, existing_phash, &converted, &skipped, &failed)
+        })?;
         skipped.report();
         failed.report();
         Ok(())
@@ -445,33 +408,19 @@ pub fn convert_posts_to_jxl(state: &AppState, editor: &mut PostEditor) {
 }
 
 /// Converts a single post to JXL. Designed for use inside a parallel iterator.
+///
+/// No database connection is held while the post is decoded and re-encoded, which is by far
+/// the slowest part of the task; one is checked out once there are results to store.
 fn convert_post_to_jxl_in_parallel(
     state: &AppState,
     post_id: i64,
+    mime_type: MimeType,
+    existing_phash: Option<i64>,
     converted: &ProgressReporter,
     skipped: &ProgressReporter,
     failed: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-    let (mime_type, existing_phash): (MimeType, Option<i64>) = match post::table
-        .find(post_id)
-        .select((post::mime_type, post::phash))
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            info!("Post {post_id}: skipped — not found (deleted between query and processing)");
-            return Ok(());
-        }
-        Err(err) => {
-            error!("Post {post_id}: failed — cannot retrieve MIME type: {err}");
-            failed.increment();
-            return Ok(());
-        }
-    };
 
     // Skip already-JXL posts.
     if mime_type == MimeType::Jxl {
@@ -570,6 +519,7 @@ fn convert_post_to_jxl_in_parallel(
     // Pixel-identical duplicates stored in different formats encode to the same JXL
     // bytes, which would violate the unique checksum constraint. Detect this up front
     // and report the duplicate pair instead of failing on the database update.
+    let mut conn = state.connection_pool.get_blocking()?;
     match post::table
         .select(post::id)
         .filter(post::checksum.eq(new_checksum.as_ref()))
@@ -616,6 +566,15 @@ fn convert_post_to_jxl_in_parallel(
             ))
             .execute(conn)
     });
+
+    // An update that matched no rows means the post was deleted while it was being converted,
+    // so the file just written belongs to nothing and has to go.
+    if let Ok(0) = db_result {
+        info!("Post {post_id}: skipped — deleted while it was being converted");
+        let _ = std::fs::remove_file(&new_content_path);
+        skipped.increment();
+        return Ok(());
+    }
 
     if let Err(err) = db_result {
         // The up-front duplicate check can race with another worker converting the
@@ -683,43 +642,27 @@ pub fn compute_phash(state: &AppState, editor: &mut PostEditor) {
         let _timer = Timer::new("compute_phash");
         let progress = ProgressReporter::new("pHash computed", PRINT_INTERVAL);
         let skipped = ProgressReporter::new("Posts skipped (pHash already set)", None);
-        post_ids
+        let targets = posts_missing_phash(state, &post_ids, &skipped)?;
+        targets
             .into_par_iter()
-            .try_for_each(|post_id| compute_phash_in_parallel(state, post_id, &progress, &skipped))?;
+            .try_for_each(|(post_id, mime_type)| compute_phash_in_parallel(state, post_id, mime_type, &progress))?;
         skipped.report();
         Ok(())
     });
 }
 
 /// Computes and stores the pHash for a single post.  Designed for use in a parallel iterator.
+///
+/// A database connection is checked out only for the final update. Decoding a post can take
+/// seconds, and a connection held for that long by every worker leaves the pool with nothing
+/// to hand out, so the checkout eventually fails and aborts the task.
 fn compute_phash_in_parallel(
     state: &AppState,
     post_id: i64,
+    mime_type: MimeType,
     progress: &ProgressReporter,
-    skipped: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
-
-    let mut conn = state.connection_pool.get_blocking()?;
-
-    let (mime_type, existing_phash): (MimeType, Option<i64>) = match post::table
-        .find(post_id)
-        .select((post::mime_type, post::phash))
-        .first(&mut conn)
-        .optional()
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return Ok(()), // deleted between query and processing
-        Err(err) => {
-            error!("Cannot retrieve metadata for post {post_id}: {err}");
-            return Ok(());
-        }
-    };
-
-    if existing_phash.is_some() {
-        skipped.increment();
-        return Ok(());
-    }
 
     let post_hash = PostHash::new(&state.config, post_id);
     let content_path = post_hash.content_path(mime_type);
@@ -749,6 +692,7 @@ fn compute_phash_in_parallel(
 
     let phash_value = hash::compute_phash(&image);
 
+    let mut conn = state.connection_pool.get_blocking()?;
     match diesel::update(post::table.find(post_id))
         .set(post::phash.eq(phash_value))
         .execute(&mut conn)
@@ -961,6 +905,83 @@ fn decode_generated_thumbnail(state: &AppState, post_id: i64) -> ApiResult<Dynam
     };
     decode::image(&post_hash.generated_thumbnail_path_with_ext(first.0), first.1)
         .or_else(|_| decode::image(&post_hash.generated_thumbnail_path_with_ext(second.0), second.1))
+}
+
+/// Number of post IDs per bulk metadata query.
+const METADATA_CHUNK_SIZE: usize = 10_000;
+
+/// Loads metadata for `post_ids` in chunks, using a single database connection.
+///
+/// Tasks fetch what they need from the database up front so that their parallel workers don't
+/// have to hold a connection while decoding, hashing, or encoding a file. A connection held
+/// across that kind of work is a connection no other worker can use, which drains the pool and
+/// eventually fails the task with a connection error. Rows are returned in ID order, which is
+/// also the order the data directory is laid out in.
+///
+/// Posts deleted between the selection query and this one are simply absent from the result.
+fn load_metadata_in_chunks<T, F>(state: &AppState, post_ids: &[i64], mut load_chunk: F) -> AdminResult<Vec<T>>
+where
+    F: FnMut(&mut PgConnection, &[i64]) -> QueryResult<Vec<T>>,
+{
+    let mut conn = state.connection_pool.get_blocking()?;
+    let mut metadata = Vec::with_capacity(post_ids.len());
+    for chunk in post_ids.chunks(METADATA_CHUNK_SIZE) {
+        admin::is_cancelled()?;
+
+        metadata.extend(load_chunk(&mut conn, chunk)?);
+    }
+    Ok(metadata)
+}
+
+/// Returns the `(id, mime_type)` of every post in `post_ids`.
+fn post_mime_types(state: &AppState, post_ids: &[i64]) -> AdminResult<Vec<(i64, MimeType)>> {
+    load_metadata_in_chunks(state, post_ids, |conn, chunk| {
+        post::table
+            .select((post::id, post::mime_type))
+            .filter(post::id.eq_any(chunk))
+            .order(post::id)
+            .load(conn)
+    })
+}
+
+/// Returns the `(id, mime_type, checksum)` of every post in `post_ids`.
+fn post_checksums(state: &AppState, post_ids: &[i64]) -> AdminResult<Vec<(i64, MimeType, Checksum)>> {
+    load_metadata_in_chunks(state, post_ids, |conn, chunk| {
+        post::table
+            .select((post::id, post::mime_type, post::checksum))
+            .filter(post::id.eq_any(chunk))
+            .order(post::id)
+            .load(conn)
+    })
+}
+
+/// Returns the `(id, mime_type, phash)` of every post in `post_ids`.
+fn post_phashes(state: &AppState, post_ids: &[i64]) -> AdminResult<Vec<(i64, MimeType, Option<i64>)>> {
+    load_metadata_in_chunks(state, post_ids, |conn, chunk| {
+        post::table
+            .select((post::id, post::mime_type, post::phash))
+            .filter(post::id.eq_any(chunk))
+            .order(post::id)
+            .load(conn)
+    })
+}
+
+/// Returns the `(id, mime_type)` of every post in `post_ids` that has no pHash yet,
+/// counting the posts that already have one as skipped.
+fn posts_missing_phash(
+    state: &AppState,
+    post_ids: &[i64],
+    skipped: &ProgressReporter,
+) -> AdminResult<Vec<(i64, MimeType)>> {
+    let mut targets = Vec::new();
+    for (post_id, mime_type, phash) in post_phashes(state, post_ids)? {
+        if phash.is_some() {
+            skipped.increment();
+        } else {
+            targets.push((post_id, mime_type));
+        }
+    }
+    Ok(targets)
 }
 
 fn user_query(state: &AppState, editor: &mut PostEditor) -> AdminResult<Vec<i64>> {
