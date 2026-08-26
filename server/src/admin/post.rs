@@ -28,7 +28,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Checks the integrity of all posts on the filesystem by comparing the stored
 /// checksum with the checksum of the post content in its current state.
@@ -737,6 +737,12 @@ fn compute_phash_in_parallel(
 
     let post_hash = PostHash::new(&state.config, post_id);
     let content_path = post_hash.content_path(mime_type);
+
+    // Decoding can abort the process outright rather than returning an error, by overflowing
+    // the worker's stack. Naming the post first is the only way to learn which file did it,
+    // since an abort leaves nothing else behind.
+    debug!("Computing pHash for post {post_id} from {}", content_path.display());
+
     let image = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(img) => img,
         // Fall back to the generated thumbnail. compute_phash downscales to 32x32 anyway,

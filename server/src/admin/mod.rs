@@ -129,10 +129,19 @@ fn parse_non_interactive_task_name(args: impl Iterator<Item = String>) -> Option
     args.next().filter(|arg| !arg.starts_with('-'))
 }
 
+/// Stack size for the worker threads that run admin tasks.
+///
+/// Rayon would otherwise leave them on Rust's 2 MiB default, which some image decoders
+/// overflow while decoding a deeply nested file. The task then aborts the whole process, so
+/// there is no per-post error to fall back on. Thread stacks are reserved address space
+/// rather than committed memory, so the headroom costs nothing until it is used.
+const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// Starts server CLI.
 pub fn command_line_mode(state: &AppState) {
     ThreadPoolBuilder::new()
         .num_threads(app::num_rayon_threads())
+        .stack_size(WORKER_STACK_SIZE)
         .build_global()
         .expect("Must be able to configure to global rayon thread pool");
 
