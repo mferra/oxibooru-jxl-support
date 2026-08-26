@@ -5,13 +5,13 @@ use crate::content::thumbnail::ThumbnailType;
 use crate::content::upload::UploadToken;
 use crate::extract::Ctx;
 use image::DynamicImage;
-use std::time::Duration;
 use url::Url;
 
 pub mod cache;
 pub mod decode;
 pub mod download;
 pub mod encode;
+pub mod ffmpeg;
 mod flash;
 pub mod hash;
 pub mod signature;
@@ -76,20 +76,6 @@ impl Content {
         let token = self.save(ctx).await?;
         tokio::task::block_in_place(|| cache::get_or_compute_properties(ctx, token))
     }
-}
-
-/// Reads a timeout in seconds from the `variable` environment variable, falling back to
-/// `default_seconds`.
-///
-/// `FFmpeg` has no timeout of its own, so every invocation is given one; the ceiling differs
-/// by an order of magnitude between probing a file and re-encoding it, hence the parameter.
-fn env_timeout(variable: &str, default_seconds: u64) -> Duration {
-    let seconds = std::env::var(variable)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|&seconds| seconds > 0)
-        .unwrap_or(default_seconds);
-    Duration::from_secs(seconds)
 }
 
 fn map_read_result<T>(result: std::io::Result<T>) -> ApiResult<T> {

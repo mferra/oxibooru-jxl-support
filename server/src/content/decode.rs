@@ -1,6 +1,6 @@
 use crate::api::error::{ApiError, ApiResult};
 use crate::config::Config;
-use crate::content::{self, flash};
+use crate::content::{self, ffmpeg, flash};
 use crate::model::enums::{MimeType, PostType};
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -86,7 +86,7 @@ pub fn representative_image(config: &Config, file_path: &Path, mime_type: MimeTy
 /// Returns if the video at `path` has an audio channel.
 pub fn video_has_audio(path: &Path) -> ApiResult<bool> {
     let path_str = path.to_string_lossy();
-    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+    let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
     command
         .input(path_str)
         .args(["-c", "copy", "-t", "0", "-f", "null", "-"]);
@@ -147,19 +147,13 @@ pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
     }
 }
 
-const FFMPEG_PATH: &str = "/opt/app/ffmpeg";
-
 /// Wall-clock limit for a single `FFmpeg` invocation, overridable with the `FFMPEG_TIMEOUT`
 /// environment variable (in seconds).
 ///
 /// `FFmpeg` has no timeout of its own, and a truncated or malformed file can leave it spinning
 /// or blocked forever. Without a limit, one bad post wedges whichever worker thread picked it
 /// up for the rest of an admin task, and enough of them stall the task completely.
-static FFMPEG_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| content::env_timeout("FFMPEG_TIMEOUT", 120));
-
-/// Cap on the `FFmpeg` log lines kept per invocation, so content that errors on every frame
-/// can't grow an unbounded error message.
-const MAX_CAPTURED_LOG_LINES: usize = 32;
+static FFMPEG_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| ffmpeg::env_timeout("FFMPEG_TIMEOUT", 120));
 
 /// The outcome of an `FFmpeg` run: whatever the event handler accumulated, along with the
 /// error-level log lines `FFmpeg` emitted while producing it.
@@ -200,7 +194,7 @@ where
         for event in events {
             if let FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, message) = &event {
                 let mut errors = thread_errors.lock().unwrap_or_else(PoisonError::into_inner);
-                if errors.len() < MAX_CAPTURED_LOG_LINES {
+                if errors.len() < ffmpeg::MAX_CAPTURED_LOG_LINES {
                     errors.push(message.clone());
                 }
             }
@@ -288,53 +282,90 @@ fn take_errors(errors: &Mutex<Vec<String>>) -> Vec<String> {
     std::mem::take(&mut errors)
 }
 
-/// A frame handed back by `FFmpeg`, or the dimensions that didn't line up with the buffer it
-/// sent. Deliberately free of [`ApiError`] so it can cross the worker thread boundary.
-enum ExtractedFrame {
-    Image(DynamicImage),
-    BufferMismatch(u32, u32, usize),
-}
-
 /// Decodes a representative frame of the image or video at the given `path`.
+///
+/// This reads the raw frame off `FFmpeg`'s stdout directly rather than through
+/// [`ffmpeg_sidecar`]'s event stream. The sidecar only starts draining stdout once it has
+/// parsed the output stream description, and it gives up on that description when the frame
+/// rate is printed in `FFmpeg`'s abbreviated form ("1k fps"), which is common for variable
+/// frame rate recordings. `FFmpeg` then blocks forever writing a frame far larger than the
+/// pipe buffer into a pipe nobody is reading.
 fn ffmpeg_frame(path: &Path, post_type: PostType) -> ApiResult<Option<DynamicImage>> {
-    let filter = match post_type {
-        PostType::Image | PostType::Animation => "format=rgba",
-        PostType::Video | PostType::Flash => "thumbnail,format=rgb24",
+    let (filter, channels) = match post_type {
+        PostType::Image | PostType::Animation => ("format=rgba", 4),
+        PostType::Video | PostType::Flash => ("thumbnail,format=rgb24", 3),
     };
 
-    let has_alpha = filter.contains("rgba");
-
-    let path_str = path.to_string_lossy();
-    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
-    command
-        .input(&path_str)
-        .args(["-vf", filter, "-frames:v", "1", "-f", "rawvideo", "-"]);
-
     let description = format!("extracting a frame from {}", path.display());
-    let run = run_ffmpeg(&description, &mut command, None::<ExtractedFrame>, move |frame, event| {
-        if let FfmpegEvent::OutputFrame(f) = event {
-            let buffer_len = f.data.len();
-            let decoded = if has_alpha {
-                RgbaImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgba8)
-            } else {
-                RgbImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgb8)
-            };
-            *frame = Some(match decoded {
-                Some(image) => ExtractedFrame::Image(image),
-                None => ExtractedFrame::BufferMismatch(f.width, f.height, buffer_len),
-            });
-        }
+    let output = ffmpeg::run(
+        &description,
+        &[
+            "-i",
+            &path.to_string_lossy(),
+            "-vf",
+            filter,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        *FFMPEG_TIMEOUT,
+    )?;
+
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+
+    let byte_count = output.stdout.len();
+    let (width, height) = frame_dimensions(&output.log_tail, byte_count, channels).ok_or_else(|| {
+        let message = format!(
+            "Cannot determine the dimensions of the {byte_count} byte frame produced while \
+             {description}. {}",
+            ffmpeg::summarize(&output.log_tail)
+        );
+        ApiError::FfmpegError(message.into())
     })?;
 
-    let FfmpegRun { state, errors } = run;
-    match state {
-        Some(ExtractedFrame::Image(image)) => Ok(Some(image)),
-        Some(ExtractedFrame::BufferMismatch(width, height, buffer_len)) => {
-            Err(ApiError::FrameBufferMismatch(width, height, buffer_len))
-        }
-        None if !errors.is_empty() => Err(ApiError::FfmpegError(errors.join("; ").into())),
-        None => Ok(None),
-    }
+    let mut data = output.stdout;
+    data.truncate(width as usize * height as usize * channels);
+
+    let frame = if channels == 4 {
+        RgbaImage::from_raw(width, height, data).map(DynamicImage::ImageRgba8)
+    } else {
+        RgbImage::from_raw(width, height, data).map(DynamicImage::ImageRgb8)
+    };
+    frame
+        .map(Some)
+        .ok_or(ApiError::FrameBufferMismatch(width, height, byte_count))
+}
+
+/// Recovers the geometry of a raw frame from `FFmpeg`'s log.
+///
+/// `FFmpeg` reports this nowhere except its human-readable stream lines, so it is scraped out
+/// of the `648x384` in those. Every candidate is checked against the number of bytes actually
+/// received, so a wrong match would have to divide the frame exactly; that check, rather than
+/// the shape of the log line, is what makes this reliable.
+fn frame_dimensions(log_tail: &[String], byte_count: usize, channels: usize) -> Option<(u32, u32)> {
+    // Later lines describe the output, which is what was written to stdout.
+    log_tail
+        .iter()
+        .rev()
+        .flat_map(|line| dimension_candidates(line))
+        .find(|&(width, height)| {
+            let frame_size = width as usize * height as usize * channels;
+            frame_size > 0 && byte_count >= frame_size && byte_count.is_multiple_of(frame_size)
+        })
+}
+
+/// Yields every `WIDTHxHEIGHT` token in `line`, along with false positives such as the `0x...`
+/// of a codec tag, which the caller is expected to reject.
+fn dimension_candidates(line: &str) -> impl Iterator<Item = (u32, u32)> + '_ {
+    line.split(|character: char| !character.is_ascii_digit() && character != 'x')
+        .filter_map(|token| {
+            let (width, height) = token.split_once('x')?;
+            Some((width.parse().ok()?, height.parse().ok()?))
+        })
 }
 
 /// Search swf tags for the largest decodable image
@@ -428,7 +459,7 @@ fn gif_is_animated(path: &Path) -> ApiResult<bool> {
 /// Uses `FFmpeg` to determine if the AVIF at `path` contains more than one frame.
 fn avif_is_animated(path: &Path) -> ApiResult<bool> {
     let path_str = path.to_string_lossy();
-    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+    let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
     command.input(&path_str);
 
     let description = format!("counting the video streams of {}", path.display());
@@ -442,7 +473,7 @@ fn avif_is_animated(path: &Path) -> ApiResult<bool> {
     .state;
 
     for stream_index in 0..video_stream_count {
-        let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+        let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
         command
             .input(&path_str)
             .args([
@@ -480,4 +511,50 @@ fn image_reader_limits() -> Limits {
     limits.max_image_width = Some(16384);
     limits.max_image_height = Some(16384);
     limits
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// FFmpeg's real output for a 640x480 VP8 file whose frame rate prints as "1k fps",
+    /// which is what `ffmpeg_sidecar` fails to parse.
+    const RAW_VIDEO_LOG: &[&str] = &[
+        "Input #0, matroska,webm, from 'hang.webm':",
+        "  Duration: 00:00:00.15, start: 0.000000, bitrate: 1711 kb/s",
+        "  Stream #0:0: Video: vp8, yuv420p(tv, progressive), 640x480, SAR 1:1 DAR 4:3, 1k fps, 1k tbr, 1k tbn",
+        "Stream mapping:",
+        "  Stream #0:0 -> #0:0 (vp8 (native) -> rawvideo (native))",
+        "Output #0, rawvideo, to 'pipe:':",
+        "  Stream #0:0: Video: rawvideo (RGB[24] / 0x18424752), rgb24(pc, gbr/unknown/unknown, \
+         progressive), 640x480 [SAR 1:1 DAR 4:3], q=2-31, 7372800 kb/s, 1k fps, 1k tbn",
+        "[out#0/rawvideo @ 0x59561a36b880] video:900KiB audio:0KiB muxing overhead: 0.000000%",
+        "frame=    1 fps=0.0 q=-0.0 Lsize=     900KiB time=00:00:00.05 speed=0.982x",
+    ];
+
+    #[test]
+    fn frame_dimensions_from_ffmpeg_log() {
+        let log: Vec<String> = RAW_VIDEO_LOG.iter().map(|line| (*line).to_owned()).collect();
+        assert_eq!(frame_dimensions(&log, 640 * 480 * 3, 3), Some((640, 480)));
+    }
+
+    #[test]
+    fn frame_dimensions_rejects_codec_tags() {
+        // `0x18424752` and `0x59561a36b880` look like dimensions but can't divide the frame.
+        let candidates: Vec<_> = RAW_VIDEO_LOG
+            .iter()
+            .flat_map(|line| dimension_candidates(line))
+            .collect();
+        assert!(candidates.contains(&(0, 18424752)), "the codec tag is a candidate");
+        assert_eq!(frame_dimensions(&["  0x18424752".to_owned()], 640 * 480 * 3, 3), None);
+    }
+
+    #[test]
+    fn frame_dimensions_requires_a_whole_number_of_frames() {
+        let log = ["  Stream #0:0: Video: rawvideo, rgb24, 640x480".to_owned()];
+        assert_eq!(frame_dimensions(&log, 640 * 480 * 3, 3), Some((640, 480)));
+        assert_eq!(frame_dimensions(&log, 640 * 480 * 3 - 1, 3), None, "truncated frame");
+        assert_eq!(frame_dimensions(&log, 640 * 480 * 4, 4), Some((640, 480)), "rgba");
+        assert_eq!(frame_dimensions(&log, 0, 3), None, "no output at all");
+    }
 }
