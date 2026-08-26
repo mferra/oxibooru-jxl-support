@@ -714,9 +714,14 @@ pub fn compute_phash(state: &AppState, editor: &mut PostEditor) {
         let progress = ProgressReporter::new("pHash computed", PRINT_INTERVAL);
         let skipped = ProgressReporter::new("Posts skipped (pHash already set)", None);
         let targets = posts_missing_phash(state, &post_ids, &skipped)?;
-        targets
-            .into_par_iter()
-            .try_for_each(|(post_id, mime_type)| compute_phash_in_parallel(state, post_id, mime_type, &progress))?;
+
+        // Deliberately serial. Decoding holds a whole image in memory, and the peak for one
+        // large post is already large enough that doing several at once is what runs the
+        // machine out of memory. Each post here is decoded, hashed, written and freed before
+        // the next one is touched, so the ceiling is one image rather than one per thread.
+        for (post_id, mime_type) in targets {
+            compute_phash_for_post(state, post_id, mime_type, &progress)?;
+        }
         skipped.report();
         Ok(())
     });
@@ -727,7 +732,7 @@ pub fn compute_phash(state: &AppState, editor: &mut PostEditor) {
 /// A database connection is checked out only for the final update. Decoding a post can take
 /// seconds, and a connection held for that long by every worker leaves the pool with nothing
 /// to hand out, so the checkout eventually fails and aborts the task.
-fn compute_phash_in_parallel(
+fn compute_phash_for_post(
     state: &AppState,
     post_id: i64,
     mime_type: MimeType,
@@ -768,6 +773,10 @@ fn compute_phash_in_parallel(
     };
 
     let phash_value = hash::compute_phash(&image);
+
+    // The hash is 8 bytes; the image it came from may be hundreds of megabytes. Free it
+    // before taking a connection so the two are never held at the same time.
+    drop(image);
 
     let mut conn = state.connection_pool.get_blocking()?;
     match diesel::update(post::table.find(post_id))

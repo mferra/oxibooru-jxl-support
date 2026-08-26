@@ -28,6 +28,24 @@ fn decode_jxl(file_path: &Path) -> ApiResult<DynamicImage> {
 
     let width = jxl.width();
     let height = jxl.height();
+
+    // Every other format is decoded through `image_reader_limits`, but jxl-oxide enforces
+    // nothing of its own, so the same ceilings have to be applied by hand. Without them a
+    // single large file can exhaust memory: rendering produces one f32 plane per channel
+    // before any of it is narrowed to 8 bits, so the peak is several times the size of the
+    // image this function returns.
+    let limits = image_reader_limits();
+    if limits.max_image_width.is_some_and(|max| width > max) || limits.max_image_height.is_some_and(|max| height > max)
+    {
+        let message = format!("JXL is {width}x{height}, which exceeds the maximum decodable dimensions");
+        return Err(ApiError::FfmpegError(message.into()));
+    }
+    let rgba_bytes = u64::from(width) * u64::from(height) * 4;
+    if limits.max_alloc.is_some_and(|max| rgba_bytes > max) {
+        let message = format!("JXL is {width}x{height}, which needs {rgba_bytes} bytes to decode");
+        return Err(ApiError::FfmpegError(message.into()));
+    }
+
     let frame = jxl
         .render_frame(0)
         .map_err(|e| ApiError::FfmpegError(e.to_string().into()))?;
