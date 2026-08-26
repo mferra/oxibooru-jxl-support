@@ -795,8 +795,9 @@ fn relate_duplicate_posts(conn: &mut PgConnection, post_id: i64, duplicate_id: i
 /// both files and comparing pixels exactly; related posts that are not true duplicates
 /// are left untouched.
 ///
-/// Merge policy: the post with the lower ID survives, and the smaller content file is
-/// kept (JXL preferred on size ties). Tags, pools, scores, favorites, features,
+/// Merge policy: the post with the lower ID survives, and the higher-resolution content
+/// file is kept — with JXL preferred on equal resolution, and the smaller file preferred
+/// when the formats match too. Tags, pools, scores, favorites, features,
 /// comments, descriptions, and relations are merged into the surviving post via the
 /// same logic as the post merge API, including a merge snapshot for auditing.
 pub fn merge_duplicate_posts(state: &AppState, editor: &mut PostEditor) {
@@ -919,11 +920,22 @@ fn merge_pair_if_duplicate(
         return;
     }
 
-    // Keep the smaller content file; prefer JXL on size ties.
-    let keep_absorbed_content = match absorbed.file_size.cmp(&merge_to.file_size) {
-        Ordering::Less => true,
-        Ordering::Greater => false,
-        Ordering::Equal => absorbed.mime_type == MimeType::Jxl && merge_to.mime_type != MimeType::Jxl,
+    // Keep the higher-resolution file; on equal resolution prefer JXL, then the smaller file.
+    // Pixel-identical content means the resolutions always match today, so the tiebreakers are
+    // what actually decide; the resolution comparison is what should hold first if the duplicate
+    // check is ever relaxed to accept content that isn't the same size. Dimensions come from the
+    // decoded images rather than the database so a stale width/height can't pick the wrong file.
+    let absorbed_pixels = u64::from(absorbed_image.width()) * u64::from(absorbed_image.height());
+    let merge_to_pixels = u64::from(merge_to_image.width()) * u64::from(merge_to_image.height());
+    let keep_absorbed_content = match absorbed_pixels.cmp(&merge_to_pixels) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => match (absorbed.mime_type == MimeType::Jxl, merge_to.mime_type == MimeType::Jxl) {
+            (true, false) => true,
+            (false, true) => false,
+            // Both JXL, or neither: fall back to the smaller file.
+            _ => absorbed.file_size < merge_to.file_size,
+        },
     };
 
     let merge_result: ApiResult<()> = conn.transaction(|conn| {
@@ -933,13 +945,14 @@ fn merge_pair_if_duplicate(
     });
     match merge_result {
         Ok(()) => {
-            let (kept_mime, kept_size) = if keep_absorbed_content {
-                (absorbed.mime_type, absorbed.file_size)
+            let (kept_mime, kept_size, kept_pixels) = if keep_absorbed_content {
+                (absorbed.mime_type, absorbed.file_size, absorbed_pixels)
             } else {
-                (merge_to.mime_type, merge_to.file_size)
+                (merge_to.mime_type, merge_to.file_size, merge_to_pixels)
             };
             info!(
-                "Merged post {absorbed_id} into post {merge_to_id} (kept {kept_mime} content, {kept_size} B)"
+                "Merged post {absorbed_id} into post {merge_to_id} \
+                 (kept {kept_mime} content, {kept_pixels} px, {kept_size} B)"
             );
             merged.increment();
         }

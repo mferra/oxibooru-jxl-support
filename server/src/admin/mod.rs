@@ -104,7 +104,7 @@ pub enum AdminTask {
     ConvertPostsToJxl,
     #[strum(message = "Compute perceptual hash (pHash) for posts that don't have one")]
     CalculatePhash,
-    #[strum(message = "Merge related posts whose content is pixel-identical (smaller file wins)")]
+    #[strum(message = "Merge related posts whose content is pixel-identical (highest resolution, then JXL, wins)")]
     MergeDuplicatePosts,
     #[strum(message = "Import a CBZ archive as a pool, matching pages against existing posts")]
     ImportCbzAsPool,
