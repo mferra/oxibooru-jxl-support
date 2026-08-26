@@ -2,6 +2,7 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::config::Config;
 use crate::content::{self, flash};
 use crate::model::enums::{MimeType, PostType};
+use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::event::{FfmpegEvent, LogLevel};
 use image::codecs::gif::GifDecoder;
@@ -10,6 +11,9 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use swf::Tag;
 use tracing::error;
 
@@ -82,28 +86,26 @@ pub fn representative_image(config: &Config, file_path: &Path, mime_type: MimeTy
 /// Returns if the video at `path` has an audio channel.
 pub fn video_has_audio(path: &Path) -> ApiResult<bool> {
     let path_str = path.to_string_lossy();
-    let iter = FfmpegCommand::new_with_path(FFMPEG_PATH)
+    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+    command
         .input(path_str)
-        .args(["-c", "copy", "-t", "0", "-f", "null", "-"])
-        .spawn()?
-        .iter()
-        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
+        .args(["-c", "copy", "-t", "0", "-f", "null", "-"]);
 
-    let mut has_audio = None;
-    let mut errors = Vec::new();
-    for event in iter {
-        match event {
-            FfmpegEvent::ParsedInputStream(stream) if stream.is_audio() => {
-                has_audio = Some(true);
-            }
-            FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, err) => errors.push(err),
-            _ => {}
+    let description = format!("probing {} for audio", path.display());
+    let run = run_ffmpeg(&description, &mut command, None::<bool>, |has_audio, event| {
+        if let FfmpegEvent::ParsedInputStream(stream) = event
+            && stream.is_audio()
+        {
+            *has_audio = Some(true);
         }
+    })?;
+
+    let FfmpegRun { state, errors } = run;
+    match state {
+        Some(has_audio) => Ok(has_audio),
+        None if !errors.is_empty() => Err(ApiError::FfmpegError(errors.join("; ").into())),
+        None => Ok(false),
     }
-    if has_audio.is_none() && !errors.is_empty() {
-        return Err(ApiError::FfmpegError(errors.join("; ").into()));
-    }
-    Ok(has_audio.unwrap_or(false))
 }
 
 /// Returns if the swf at `path` has audio.
@@ -147,6 +149,152 @@ pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
 
 const FFMPEG_PATH: &str = "/opt/app/ffmpeg";
 
+/// Wall-clock limit for a single `FFmpeg` invocation, overridable with the `FFMPEG_TIMEOUT`
+/// environment variable (in seconds).
+///
+/// `FFmpeg` has no timeout of its own, and a truncated or malformed file can leave it spinning
+/// or blocked forever. Without a limit, one bad post wedges whichever worker thread picked it
+/// up for the rest of an admin task, and enough of them stall the task completely.
+static FFMPEG_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| content::env_timeout("FFMPEG_TIMEOUT", 120));
+
+/// Cap on the `FFmpeg` log lines kept per invocation, so content that errors on every frame
+/// can't grow an unbounded error message.
+const MAX_CAPTURED_LOG_LINES: usize = 32;
+
+/// The outcome of an `FFmpeg` run: whatever the event handler accumulated, along with the
+/// error-level log lines `FFmpeg` emitted while producing it.
+struct FfmpegRun<S> {
+    state: S,
+    errors: Vec<String>,
+}
+
+/// Runs `command` to completion, passing every `FFmpeg` event to `handler`.
+///
+/// The event stream is consumed on a worker thread so that the child handle stays reachable
+/// here: if `FFmpeg` hasn't finished within [`FFMPEG_TIMEOUT`] it is killed, and either way it
+/// is waited on. That wait is what keeps exited `FFmpeg` processes from piling up as zombies,
+/// since dropping the handle neither kills nor reaps the process.
+///
+/// `description` is a participle phrase naming the work ("extracting a frame from ..."), and
+/// shows up in the timeout logs.
+fn run_ffmpeg<S, F>(
+    description: &str,
+    command: &mut FfmpegCommand,
+    initial_state: S,
+    mut handler: F,
+) -> ApiResult<FfmpegRun<S>>
+where
+    S: Send + 'static,
+    F: FnMut(&mut S, FfmpegEvent) + Send + 'static,
+{
+    let mut child = command.spawn()?;
+    let events = child
+        .iter()
+        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
+
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let thread_errors = Arc::clone(&errors);
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut state = initial_state;
+        for event in events {
+            if let FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, message) = &event {
+                let mut errors = thread_errors.lock().unwrap_or_else(PoisonError::into_inner);
+                if errors.len() < MAX_CAPTURED_LOG_LINES {
+                    errors.push(message.clone());
+                }
+            }
+            handler(&mut state, event);
+        }
+        // The receiver is gone if we already timed out, in which case the state is moot.
+        // Killing the child ends the iteration above, so this thread never outlives it.
+        let _ = sender.send(state);
+    });
+
+    match receiver.recv_timeout(*FFMPEG_TIMEOUT) {
+        Ok(state) => {
+            reap(&mut child, description);
+            Ok(FfmpegRun {
+                state,
+                errors: take_errors(&errors),
+            })
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            let timeout = FFMPEG_TIMEOUT.as_secs();
+            let logged = take_errors(&errors);
+            let log_tail = if logged.is_empty() {
+                "It logged no errors before hanging.".to_owned()
+            } else {
+                format!("Last FFmpeg errors: {}", logged.join("; "))
+            };
+            error!("FFmpeg timed out after {timeout}s while {description}; killing it. {log_tail}");
+
+            kill(&mut child, description);
+            reap(&mut child, description);
+            Err(ApiError::FfmpegError(
+                format!("FFmpeg timed out after {timeout}s while {description}").into(),
+            ))
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            kill(&mut child, description);
+            reap(&mut child, description);
+            Err(ApiError::FfmpegError(
+                format!("FFmpeg event reader died while {description}").into(),
+            ))
+        }
+    }
+}
+
+/// Sends `SIGKILL` (or the platform equivalent) to a stuck `FFmpeg` process.
+fn kill(child: &mut FfmpegChild, description: &str) {
+    if let Err(err) = child.kill() {
+        error!("Cannot kill stuck FFmpeg process while {description}: {err}");
+    }
+}
+
+/// Waits on `child` so that the exited process leaves the process table instead of lingering
+/// as a zombie. Dropping the handle does neither, which is what let stray `ffmpeg` processes
+/// accumulate for the lifetime of the server.
+///
+/// `FFmpeg`'s event stream has already ended by the time this runs, so the process has nothing
+/// left to say and should be on its way out; one that is still alive after a short grace
+/// period is stuck, and gets killed rather than blocking the caller.
+fn reap(child: &mut FfmpegChild, description: &str) {
+    const GRACE_PERIOD: Duration = Duration::from_secs(5);
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let deadline = Instant::now() + GRACE_PERIOD;
+    loop {
+        match child.as_inner_mut().try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => break,
+            Err(err) => {
+                error!("Cannot wait on FFmpeg process while {description}: {err}");
+                return;
+            }
+        }
+    }
+
+    error!("FFmpeg is still running after its output ended while {description}; killing it");
+    kill(child, description);
+    if let Err(err) = child.wait() {
+        error!("Cannot reap FFmpeg process while {description}: {err}");
+    }
+}
+
+fn take_errors(errors: &Mutex<Vec<String>>) -> Vec<String> {
+    let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
+    std::mem::take(&mut errors)
+}
+
+/// A frame handed back by `FFmpeg`, or the dimensions that didn't line up with the buffer it
+/// sent. Deliberately free of [`ApiError`] so it can cross the worker thread boundary.
+enum ExtractedFrame {
+    Image(DynamicImage),
+    BufferMismatch(u32, u32, usize),
+}
+
 /// Decodes a representative frame of the image or video at the given `path`.
 fn ffmpeg_frame(path: &Path, post_type: PostType) -> ApiResult<Option<DynamicImage>> {
     let filter = match post_type {
@@ -154,36 +302,39 @@ fn ffmpeg_frame(path: &Path, post_type: PostType) -> ApiResult<Option<DynamicIma
         PostType::Video | PostType::Flash => "thumbnail,format=rgb24",
     };
 
-    let path_str = path.to_string_lossy();
-    let iter = FfmpegCommand::new_with_path(FFMPEG_PATH)
-        .input(&path_str)
-        .args(["-vf", filter, "-frames:v", "1", "-f", "rawvideo", "-"])
-        .spawn()?
-        .iter()
-        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
+    let has_alpha = filter.contains("rgba");
 
-    let mut frame = None;
-    let mut errors = Vec::new();
-    for event in iter {
-        match event {
-            FfmpegEvent::OutputFrame(f) => {
-                let buffer_len = f.data.len();
-                let extracted_frame = if filter.contains("rgba") {
-                    RgbaImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgba8)
-                } else {
-                    RgbImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgb8)
-                }
-                .ok_or(ApiError::FrameBufferMismatch(f.width, f.height, buffer_len))?;
-                frame = Some(extracted_frame);
-            }
-            FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, err) => errors.push(err),
-            _ => {}
+    let path_str = path.to_string_lossy();
+    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+    command
+        .input(&path_str)
+        .args(["-vf", filter, "-frames:v", "1", "-f", "rawvideo", "-"]);
+
+    let description = format!("extracting a frame from {}", path.display());
+    let run = run_ffmpeg(&description, &mut command, None::<ExtractedFrame>, move |frame, event| {
+        if let FfmpegEvent::OutputFrame(f) = event {
+            let buffer_len = f.data.len();
+            let decoded = if has_alpha {
+                RgbaImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgba8)
+            } else {
+                RgbImage::from_raw(f.width, f.height, f.data).map(DynamicImage::ImageRgb8)
+            };
+            *frame = Some(match decoded {
+                Some(image) => ExtractedFrame::Image(image),
+                None => ExtractedFrame::BufferMismatch(f.width, f.height, buffer_len),
+            });
         }
+    })?;
+
+    let FfmpegRun { state, errors } = run;
+    match state {
+        Some(ExtractedFrame::Image(image)) => Ok(Some(image)),
+        Some(ExtractedFrame::BufferMismatch(width, height, buffer_len)) => {
+            Err(ApiError::FrameBufferMismatch(width, height, buffer_len))
+        }
+        None if !errors.is_empty() => Err(ApiError::FfmpegError(errors.join("; ").into())),
+        None => Ok(None),
     }
-    if frame.is_none() && !errors.is_empty() {
-        return Err(ApiError::FfmpegError(errors.join("; ").into()));
-    }
-    Ok(frame)
 }
 
 /// Search swf tags for the largest decodable image
@@ -277,16 +428,22 @@ fn gif_is_animated(path: &Path) -> ApiResult<bool> {
 /// Uses `FFmpeg` to determine if the AVIF at `path` contains more than one frame.
 fn avif_is_animated(path: &Path) -> ApiResult<bool> {
     let path_str = path.to_string_lossy();
-    let video_stream_count = FfmpegCommand::new_with_path(FFMPEG_PATH)
-        .input(&path_str)
-        .spawn()?
-        .iter()
-        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?
-        .filter(|event| matches!(event, FfmpegEvent::ParsedInputStream(stream) if stream.is_video()))
-        .count();
+    let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+    command.input(&path_str);
+
+    let description = format!("counting the video streams of {}", path.display());
+    let video_stream_count = run_ffmpeg(&description, &mut command, 0usize, |count, event| {
+        if let FfmpegEvent::ParsedInputStream(stream) = event
+            && stream.is_video()
+        {
+            *count += 1;
+        }
+    })?
+    .state;
 
     for stream_index in 0..video_stream_count {
-        let iter = FfmpegCommand::new_with_path(FFMPEG_PATH)
+        let mut command = FfmpegCommand::new_with_path(FFMPEG_PATH);
+        command
             .input(&path_str)
             .args([
                 "-map",
@@ -296,25 +453,19 @@ fn avif_is_animated(path: &Path) -> ApiResult<bool> {
                 "-vf",
                 "scale=1:1:flags=neighbor",
             ])
-            .rawvideo()
-            .spawn()?
-            .iter()
-            .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
+            .rawvideo();
 
-        let mut frames = 0;
-        let mut errors = Vec::new();
-        for event in iter {
-            match event {
-                FfmpegEvent::OutputFrame(_) => frames += 1,
-                FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, err) => errors.push(err),
-                _ => {}
+        let description = format!("checking stream {stream_index} of {} for animation", path.display());
+        let run = run_ffmpeg(&description, &mut command, 0u32, |frames, event| {
+            if let FfmpegEvent::OutputFrame(_) = event {
+                *frames += 1;
             }
-        }
+        })?;
 
-        if frames > 1 {
+        if run.state > 1 {
             return Ok(true);
-        } else if frames == 0 && !errors.is_empty() {
-            return Err(ApiError::FfmpegError(errors.join("; ").into()));
+        } else if run.state == 0 && !run.errors.is_empty() {
+            return Err(ApiError::FfmpegError(run.errors.join("; ").into()));
         }
     }
     Ok(false)

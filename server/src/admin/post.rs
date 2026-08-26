@@ -148,11 +148,22 @@ fn regenerate_thumbnails_impl(state: &AppState, editor: &mut PostEditor, force: 
         let _timer = Timer::new("regenerate_thumbnails");
         let progress = ProgressReporter::new("Thumbnails regenerated", PRINT_INTERVAL);
         let skipped = ProgressReporter::new("Posts skipped (thumbnail already in configured format)", None);
+        let failed = ProgressReporter::new("Posts skipped (content could not be decoded)", None);
         let metadata = thumbnail_metadata(state, &post_ids)?;
         metadata.into_par_iter().try_for_each(|(post_id, mime_type, thumbnail_size)| {
-            regenerate_thumbnail_in_parallel(state, post_id, mime_type, thumbnail_size, force, &progress, &skipped)
+            regenerate_thumbnail_in_parallel(
+                state,
+                post_id,
+                mime_type,
+                thumbnail_size,
+                force,
+                &progress,
+                &skipped,
+                &failed,
+            )
         })?;
         skipped.report();
+        failed.report();
         Ok(())
     });
 }
@@ -386,6 +397,7 @@ fn regenerate_thumbnail_in_parallel(
     force: bool,
     progress: &ProgressReporter,
     skipped: &ProgressReporter,
+    failed: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
@@ -410,7 +422,10 @@ fn regenerate_thumbnail_in_parallel(
     let thumbnail = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(image) => thumbnail::create(&state.config, &image, ThumbnailType::Post),
         Err(err) => {
+            // Decoding is where FFmpeg can time out on a wedged video, so keep the post's
+            // existing thumbnail and move on to the next one rather than aborting the run.
             error!("Cannot decode content for post {post_id} from {}: {err}", content_path.display());
+            failed.increment();
             return Ok(());
         }
     };
