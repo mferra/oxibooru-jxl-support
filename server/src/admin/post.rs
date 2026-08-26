@@ -27,6 +27,7 @@ use image::{DynamicImage, GenericImageView};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::path::Path;
 use tracing::{error, info, warn};
 
 /// Checks the integrity of all posts on the filesystem by comparing the stored
@@ -121,16 +122,38 @@ pub fn recompute_post_types(state: &AppState, editor: &mut PostEditor) {
     });
 }
 
+/// Regenerates the generated thumbnails of the selected posts.
+///
+/// Posts whose thumbnail already exists on disk in the format configured under
+/// `[thumbnails]` are left alone, since that file is exactly what the server serves and
+/// re-encoding it would only cost CPU. A thumbnail is regenerated when it is missing,
+/// empty, or only present in the other format, which is the state left behind after
+/// switching `thumbnails.format` between JPEG and JXL. Use `regenerate_thumbnails_force`
+/// to rebuild thumbnails that are already in the configured format, such as after
+/// changing the thumbnail dimensions or JXL quality.
 pub fn regenerate_thumbnails(state: &AppState, editor: &mut PostEditor) {
+    regenerate_thumbnails_impl(state, editor, false);
+}
+
+/// Regenerates the generated thumbnails of the selected posts unconditionally,
+/// replacing thumbnails that already exist in the configured format.
+pub fn force_regenerate_thumbnails(state: &AppState, editor: &mut PostEditor) {
+    regenerate_thumbnails_impl(state, editor, true);
+}
+
+fn regenerate_thumbnails_impl(state: &AppState, editor: &mut PostEditor, force: bool) {
     input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("regenerate_thumbnails");
         let progress = ProgressReporter::new("Thumbnails regenerated", PRINT_INTERVAL);
-        let metadata = post_mime_types(state, &post_ids)?;
-        metadata
-            .into_par_iter()
-            .try_for_each(|(post_id, mime_type)| regenerate_thumbnail_in_parallel(state, post_id, mime_type, &progress))
+        let skipped = ProgressReporter::new("Posts skipped (thumbnail already in configured format)", None);
+        let metadata = thumbnail_metadata(state, &post_ids)?;
+        metadata.into_par_iter().try_for_each(|(post_id, mime_type, thumbnail_size)| {
+            regenerate_thumbnail_in_parallel(state, post_id, mime_type, thumbnail_size, force, &progress, &skipped)
+        })?;
+        skipped.report();
+        Ok(())
     });
 }
 
@@ -351,18 +374,38 @@ fn recompute_signature_in_parallel(
 
 /// Regenerates the thumbnail of post `post_id`. Designed to operate in a parallel iterator.
 ///
-/// A database connection is only checked out for the final update, never while decoding or
-/// encoding, because a connection held across image work keeps the whole pool busy for as
-/// long as the slowest decode takes.
+/// Unless `force` is set, a thumbnail that already exists on disk in the configured format is
+/// kept and the post is counted as skipped. A database connection is only checked out for the
+/// final update, never while decoding or encoding, because a connection held across image work
+/// keeps the whole pool busy for as long as the slowest decode takes.
 fn regenerate_thumbnail_in_parallel(
     state: &AppState,
     post_id: i64,
     mime_type: MimeType,
+    recorded_thumbnail_size: i64,
+    force: bool,
     progress: &ProgressReporter,
+    skipped: &ProgressReporter,
 ) -> AdminResult<()> {
     admin::is_cancelled()?;
 
     let post_hash = PostHash::new(&state.config, post_id);
+    if !force && let Some(thumbnail_size) = usable_thumbnail_size(&post_hash.generated_thumbnail_path()) {
+        // The thumbnail is up to date, but the size cached in the database may not be,
+        // so correct it while we have the file size at hand.
+        if thumbnail_size != recorded_thumbnail_size {
+            let mut conn = state.connection_pool.get_blocking()?;
+            let update_result = diesel::update(post::table.find(post_id))
+                .set(post::generated_thumbnail_size.eq(thumbnail_size))
+                .execute(&mut conn);
+            if let Err(err) = update_result {
+                warn!("Cannot update cached thumbnail size for post {post_id}: {err}");
+            }
+        }
+        skipped.increment();
+        return Ok(());
+    }
+
     let content_path = post_hash.content_path(mime_type);
     let thumbnail = match decode::representative_image(&state.config, &content_path, mime_type) {
         Ok(image) => thumbnail::create(&state.config, &image, ThumbnailType::Post),
@@ -372,6 +415,12 @@ fn regenerate_thumbnail_in_parallel(
         }
     };
 
+    // Remove thumbnails left behind in the other format so that switching
+    // thumbnails.format doesn't leave orphans in the data directory.
+    if let Err(err) = filesystem::delete_post_thumbnails_all_formats(&post_hash, ThumbnailCategory::Generated) {
+        warn!("Cannot remove old thumbnail for post {post_id}: {err}");
+    }
+
     let mut conn = state.connection_pool.get_blocking()?;
     if let Err(err) = update::post::thumbnail(&mut conn, &post_hash, &thumbnail, ThumbnailCategory::Generated) {
         error!("Cannot save thumbnail for post {post_id} for reason: {err}");
@@ -379,6 +428,13 @@ fn regenerate_thumbnail_in_parallel(
         progress.increment();
     }
     Ok(())
+}
+
+/// Returns the size of the thumbnail at `path`, or `None` if it doesn't exist or is empty.
+/// An empty file is treated as missing: it's what an interrupted write leaves behind and
+/// it can't be served.
+fn usable_thumbnail_size(path: &Path) -> Option<i64> {
+    filesystem::file_size(path).ok().filter(|&size| size > 0)
 }
 
 /// Re-encodes image-type post content as JPEG XL and regenerates thumbnails.
@@ -982,6 +1038,17 @@ fn posts_missing_phash(
         }
     }
     Ok(targets)
+}
+
+/// Returns the `(id, mime_type, generated_thumbnail_size)` of every post in `post_ids`.
+fn thumbnail_metadata(state: &AppState, post_ids: &[i64]) -> AdminResult<Vec<(i64, MimeType, i64)>> {
+    load_metadata_in_chunks(state, post_ids, |conn, chunk| {
+        post::table
+            .select((post::id, post::mime_type, post::generated_thumbnail_size))
+            .filter(post::id.eq_any(chunk))
+            .order(post::id)
+            .load(conn)
+    })
 }
 
 fn user_query(state: &AppState, editor: &mut PostEditor) -> AdminResult<Vec<i64>> {

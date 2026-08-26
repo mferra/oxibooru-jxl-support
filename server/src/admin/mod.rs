@@ -88,8 +88,10 @@ pub enum AdminTask {
     RecomputeIndex,
     #[strum(message = "Recompute post types")]
     RecomputePostTypes,
-    #[strum(message = "Regenerate post thumbnails")]
+    #[strum(message = "Regenerate post thumbnails that are missing or not in the configured format")]
     RegenerateThumbnails,
+    #[strum(message = "Regenerate post thumbnails, including ones already in the configured format")]
+    RegenerateThumbnailsForce,
     #[strum(message = "Reset user passwords")]
     ResetPasswords,
     #[strum(message = "Rebuild data directory")]
@@ -254,6 +256,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::RecomputeIndex => post::recompute_indexes(state, post_editor),
         AdminTask::RecomputePostTypes => post::recompute_post_types(state, post_editor),
         AdminTask::RegenerateThumbnails => post::regenerate_thumbnails(state, post_editor),
+        AdminTask::RegenerateThumbnailsForce => post::force_regenerate_thumbnails(state, post_editor),
         AdminTask::ResetPasswords => user::reset_password(state, user_editor),
         AdminTask::ResetFilenames => database::reset_filenames(state),
         AdminTask::ResetStatistics => database::reset_statistics(state),

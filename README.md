@@ -314,13 +314,25 @@ For cron/CI use, pass the task name directly to run it once, non-interactively, 
 | `recompute_checksums`   | Recompute all post checksums                                    |
 | `recompute_signatures`  | Rebuild reverse-search signatures                               |
 | `recompute_index`       | Rebuild reverse-search index only (faster)                      |
-| `regenerate_thumbnails` | Regenerate all post thumbnails                                  |
+| `regenerate_thumbnails` | Regenerate post thumbnails that are missing or in the wrong format |
+| `regenerate_thumbnails_force` | Regenerate post thumbnails unconditionally                |
 | `reset_passwords`       | Reset user passwords                                            |
 | `reset_filenames`       | Rebuild the data directory layout                               |
 | `reset_statistics`      | Rebuild table statistics                                        |
 | `reset_thumbnail_sizes` | Re-cache thumbnail dimensions                                   |
 | `convert_posts_to_jxl`  | Re-encode static image posts as JXL and regenerate thumbnails   |
 | `calculate_phash`       | Compute perceptual hash for posts that don't have one yet       |
+
+### `regenerate_thumbnails`
+
+Rebuilds the generated thumbnail of every selected post whose thumbnail is **missing, empty, or
+only present in the other format**. A post that already has a thumbnail in the format set by
+`[thumbnails] format` is skipped, so the task is cheap to re-run and is the way to fill in
+thumbnails after switching `format` between `jpeg` and `jxl` (leftover files in the old format
+are removed as each post is regenerated).
+
+Use `regenerate_thumbnails_force` when the existing thumbnails are valid but need rebuilding
+anyway, such as after changing `post_width`/`post_height` or `jxl_quality`.
 
 ### `convert_posts_to_jxl`
 
