@@ -94,8 +94,19 @@ impl Context {
 /// Returns the number of threads that the global rayon thread pool will
 /// be constructed with. The rayon thread pool is currently only used when
 /// executing admin commands.
+///
+/// Defaults to half the available parallelism, overridable with `RAYON_NUM_THREADS`. Rayon
+/// reads that variable itself, but only when the thread count is left unset, so honouring it
+/// here is what keeps it working. Setting it to 1 runs admin tasks serially, which is how you
+/// get a task that aborts the process to name the post responsible in its last log line.
 pub fn num_rayon_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |threads| std::cmp::max(threads.get() / 2, 1))
+    std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|threads| threads.parse().ok())
+        .filter(|&threads| threads > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, |threads| std::cmp::max(threads.get() / 2, 1))
+        })
 }
 
 /// Initializes logging using [`tracing_subscriber`].
