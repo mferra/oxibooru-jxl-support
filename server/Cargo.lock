@@ -1038,15 +1038,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ffmpeg-sidecar"
-version = "2.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cdd8688a82c1fcfef3f61b7e487599a846759c75de9da03cae9085bf7247274"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2336,7 +2327,6 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "dotenvy",
- "ffmpeg-sidecar",
  "flate2",
  "futures-util",
  "hex",

@@ -106,7 +106,7 @@ pub fn compute_properties_no_cache(ctx: &Context, token: UploadToken) -> ApiResu
 
     let has_sound = match post_type {
         PostType::Image | PostType::Animation => false,
-        PostType::Video => decode::video_has_audio(&temp_path)?,
+        PostType::Video => decode::video_has_audio(&temp_path),
         PostType::Flash => decode::swf_has_audio(&temp_path)?,
     };
     let flags = if has_sound {

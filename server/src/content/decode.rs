@@ -2,20 +2,16 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::config::Config;
 use crate::content::{self, ffmpeg, flash};
 use crate::model::enums::{MimeType, PostType};
-use ffmpeg_sidecar::child::FfmpegChild;
-use ffmpeg_sidecar::command::FfmpegCommand;
-use ffmpeg_sidecar::event::{FfmpegEvent, LogLevel};
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, RgbImage, RgbaImage};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::LazyLock;
+use std::time::Duration;
 use swf::Tag;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Infers a [`MimeType`] from the magic bytes at the start of a file's contents,
 /// rather than trusting a client-supplied extension or `Content-Type` header.
@@ -84,27 +80,39 @@ pub fn representative_image(config: &Config, file_path: &Path, mime_type: MimeTy
 }
 
 /// Returns if the video at `path` has an audio channel.
-pub fn video_has_audio(path: &Path) -> ApiResult<bool> {
-    let path_str = path.to_string_lossy();
-    let mut command = FfmpegCommand::new_with_path(ffmpeg::PATH);
-    command
-        .input(path_str)
-        .args(["-c", "copy", "-t", "0", "-f", "null", "-"]);
-
+///
+/// The answer is `FFmpeg`'s exit status rather than anything scraped from its log: mapping
+/// `0:a:0` succeeds only if the file has an audio stream. `-c copy` means no audio decoder is
+/// needed, so this works even for codecs the bundled `FFmpeg` cannot decode.
+pub fn video_has_audio(path: &Path) -> bool {
     let description = format!("probing {} for audio", path.display());
-    let run = run_ffmpeg(&description, &mut command, None::<bool>, |has_audio, event| {
-        if let FfmpegEvent::ParsedInputStream(stream) = event
-            && stream.is_audio()
-        {
-            *has_audio = Some(true);
-        }
-    })?;
+    let output = ffmpeg::run(
+        &description,
+        &[
+            "-i",
+            &path.to_string_lossy(),
+            "-map",
+            "0:a:0",
+            "-c",
+            "copy",
+            "-t",
+            "0",
+            "-f",
+            "null",
+            "-",
+        ],
+        *FFMPEG_TIMEOUT,
+    );
 
-    let FfmpegRun { state, errors } = run;
-    match state {
-        Some(has_audio) => Ok(has_audio),
-        None if !errors.is_empty() => Err(ApiError::FfmpegError(errors.join("; ").into())),
-        None => Ok(false),
+    match output {
+        Ok(_) => true,
+        // A file with no audio stream fails here, which is the common case and not worth a
+        // log line. A genuinely broken file fails too, but it is about to be decoded for a
+        // thumbnail, and that is where the real error belongs.
+        Err(err) => {
+            debug!("No audio stream in {}: {err}", path.display());
+            false
+        }
     }
 }
 
@@ -155,137 +163,10 @@ pub fn image(file_path: &Path, mime_type: MimeType) -> ApiResult<DynamicImage> {
 /// up for the rest of an admin task, and enough of them stall the task completely.
 static FFMPEG_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| ffmpeg::env_timeout("FFMPEG_TIMEOUT", 120));
 
-/// The outcome of an `FFmpeg` run: whatever the event handler accumulated, along with the
-/// error-level log lines `FFmpeg` emitted while producing it.
-struct FfmpegRun<S> {
-    state: S,
-    errors: Vec<String>,
-}
-
-/// Runs `command` to completion, passing every `FFmpeg` event to `handler`.
-///
-/// The event stream is consumed on a worker thread so that the child handle stays reachable
-/// here: if `FFmpeg` hasn't finished within [`FFMPEG_TIMEOUT`] it is killed, and either way it
-/// is waited on. That wait is what keeps exited `FFmpeg` processes from piling up as zombies,
-/// since dropping the handle neither kills nor reaps the process.
-///
-/// `description` is a participle phrase naming the work ("extracting a frame from ..."), and
-/// shows up in the timeout logs.
-fn run_ffmpeg<S, F>(
-    description: &str,
-    command: &mut FfmpegCommand,
-    initial_state: S,
-    mut handler: F,
-) -> ApiResult<FfmpegRun<S>>
-where
-    S: Send + 'static,
-    F: FnMut(&mut S, FfmpegEvent) + Send + 'static,
-{
-    let mut child = command.spawn()?;
-    let events = child
-        .iter()
-        .map_err(|err| ApiError::FfmpegError(err.into_boxed_dyn_error()))?;
-
-    let errors = Arc::new(Mutex::new(Vec::new()));
-    let thread_errors = Arc::clone(&errors);
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut state = initial_state;
-        for event in events {
-            if let FfmpegEvent::Log(LogLevel::Error | LogLevel::Fatal, message) = &event {
-                let mut errors = thread_errors.lock().unwrap_or_else(PoisonError::into_inner);
-                if errors.len() < ffmpeg::MAX_CAPTURED_LOG_LINES {
-                    errors.push(message.clone());
-                }
-            }
-            handler(&mut state, event);
-        }
-        // The receiver is gone if we already timed out, in which case the state is moot.
-        // Killing the child ends the iteration above, so this thread never outlives it.
-        let _ = sender.send(state);
-    });
-
-    match receiver.recv_timeout(*FFMPEG_TIMEOUT) {
-        Ok(state) => {
-            reap(&mut child, description);
-            Ok(FfmpegRun {
-                state,
-                errors: take_errors(&errors),
-            })
-        }
-        Err(RecvTimeoutError::Timeout) => {
-            let timeout = FFMPEG_TIMEOUT.as_secs();
-            let logged = take_errors(&errors);
-            let log_tail = if logged.is_empty() {
-                "It logged no errors before hanging.".to_owned()
-            } else {
-                format!("Last FFmpeg errors: {}", logged.join("; "))
-            };
-            error!("FFmpeg timed out after {timeout}s while {description}; killing it. {log_tail}");
-
-            kill(&mut child, description);
-            reap(&mut child, description);
-            Err(ApiError::FfmpegError(
-                format!("FFmpeg timed out after {timeout}s while {description}").into(),
-            ))
-        }
-        Err(RecvTimeoutError::Disconnected) => {
-            kill(&mut child, description);
-            reap(&mut child, description);
-            Err(ApiError::FfmpegError(
-                format!("FFmpeg event reader died while {description}").into(),
-            ))
-        }
-    }
-}
-
-/// Sends `SIGKILL` (or the platform equivalent) to a stuck `FFmpeg` process.
-fn kill(child: &mut FfmpegChild, description: &str) {
-    if let Err(err) = child.kill() {
-        error!("Cannot kill stuck FFmpeg process while {description}: {err}");
-    }
-}
-
-/// Waits on `child` so that the exited process leaves the process table instead of lingering
-/// as a zombie. Dropping the handle does neither, which is what let stray `ffmpeg` processes
-/// accumulate for the lifetime of the server.
-///
-/// `FFmpeg`'s event stream has already ended by the time this runs, so the process has nothing
-/// left to say and should be on its way out; one that is still alive after a short grace
-/// period is stuck, and gets killed rather than blocking the caller.
-fn reap(child: &mut FfmpegChild, description: &str) {
-    const GRACE_PERIOD: Duration = Duration::from_secs(5);
-    const POLL_INTERVAL: Duration = Duration::from_millis(25);
-
-    let deadline = Instant::now() + GRACE_PERIOD;
-    loop {
-        match child.as_inner_mut().try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-            Ok(None) => break,
-            Err(err) => {
-                error!("Cannot wait on FFmpeg process while {description}: {err}");
-                return;
-            }
-        }
-    }
-
-    error!("FFmpeg is still running after its output ended while {description}; killing it");
-    kill(child, description);
-    if let Err(err) = child.wait() {
-        error!("Cannot reap FFmpeg process while {description}: {err}");
-    }
-}
-
-fn take_errors(errors: &Mutex<Vec<String>>) -> Vec<String> {
-    let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
-    std::mem::take(&mut errors)
-}
-
 /// Decodes a representative frame of the image or video at the given `path`.
 ///
 /// This reads the raw frame off `FFmpeg`'s stdout directly rather than through
-/// [`ffmpeg_sidecar`]'s event stream. The sidecar only starts draining stdout once it has
+/// `ffmpeg-sidecar`'s event stream. The sidecar only starts draining stdout once it has
 /// parsed the output stream description, and it gives up on that description when the frame
 /// rate is printed in `FFmpeg`'s abbreviated form ("1k fps"), which is common for variable
 /// frame rate recordings. `FFmpeg` then blocks forever writing a frame far larger than the
@@ -460,7 +341,7 @@ fn gif_is_animated(path: &Path) -> ApiResult<bool> {
 ///
 /// Each video stream is decoded to 1x1 RGB frames, so the frame count is simply the number of
 /// bytes `FFmpeg` writes divided by three. Counting bytes instead of parsed events keeps this
-/// honest on files whose stream description [`ffmpeg_sidecar`] cannot parse, where it would
+/// honest on files whose stream description `ffmpeg-sidecar` cannot parse, where it would
 /// otherwise see no frames at all and call an animation still.
 ///
 /// Every stream has to be checked, not just the first: an animated AVIF typically carries its
@@ -529,7 +410,7 @@ mod test {
     use super::*;
 
     /// FFmpeg's real output for a 640x480 VP8 file whose frame rate prints as "1k fps",
-    /// which is what `ffmpeg_sidecar` fails to parse.
+    /// which is what `ffmpeg-sidecar` failed to parse.
     const RAW_VIDEO_LOG: &[&str] = &[
         "Input #0, matroska,webm, from 'hang.webm':",
         "  Duration: 00:00:00.15, start: 0.000000, bitrate: 1711 kb/s",

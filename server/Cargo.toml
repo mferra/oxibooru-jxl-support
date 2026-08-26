@@ -16,7 +16,6 @@ diesel = { version = "2.3.2", features = ["postgres", "r2d2", "time", "uuid", "s
                                           "i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
 diesel_migrations = { version = "2.3.0", features = ["postgres"] }
 dotenvy = "0.15.7"
-ffmpeg-sidecar = { version = "2.5.0", default-features = false }
 flate2 = "1.0.35"
 futures-util = "0.3.32"
 hex = "0.4.3"
