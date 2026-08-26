@@ -707,13 +707,29 @@ fn convert_post_to_jxl_in_parallel(
 ///
 /// Skips posts whose `phash` column is already set.  Safe to run multiple times.
 pub fn compute_phash(state: &AppState, editor: &mut PostEditor) {
+    compute_phash_impl(state, editor, false);
+}
+
+/// Recomputes the pHash of every selected post, replacing hashes that already exist.
+///
+/// Useful when the hash is derived differently than it was, or to make a library consistent
+/// after some posts were hashed from their original and others fell back to a thumbnail.
+pub fn recalculate_phash_total(state: &AppState, editor: &mut PostEditor) {
+    compute_phash_impl(state, editor, true);
+}
+
+fn compute_phash_impl(state: &AppState, editor: &mut PostEditor, force: bool) {
     input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
         let post_ids = user_query(state, editor)?;
 
         let _timer = Timer::new("compute_phash");
         let progress = ProgressReporter::new("pHash computed", PRINT_INTERVAL);
         let skipped = ProgressReporter::new("Posts skipped (pHash already set)", None);
-        let targets = posts_missing_phash(state, &post_ids, &skipped)?;
+        let targets = if force {
+            post_mime_types(state, &post_ids)?
+        } else {
+            posts_missing_phash(state, &post_ids, &skipped)?
+        };
 
         // Deliberately serial. Decoding holds a whole image in memory, and the peak for one
         // large post is already large enough that doing several at once is what runs the
