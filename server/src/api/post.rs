@@ -1699,6 +1699,7 @@ mod test {
         let mut conn = get_connection()?;
         let (post, tag_count, relation_count) = get_post_info(&mut conn)?;
 
+        simulate_upload("1_pixel.png", "thumbnail.png")?;
         verify_response(&format!("PUT /post/{POST_ID}/?{FIELDS}"), "post/edit/typical").await?;
 
         let (new_post, new_tag_count, new_relation_count) = get_post_info(&mut conn)?;
@@ -1757,8 +1758,6 @@ mod test {
             "post/list/with_preferences",
         )
         .await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /post/5", "post/get/with_preferences").await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /post/4/around", "post/get_around/blacklisted").await?;
         verify_response_with_user(
             UserRank::Anonymous,
             "GET /post/4/around/?fields=id,relations,relationCount",
@@ -1789,6 +1788,20 @@ mod test {
 
         reset_database();
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn blacklisted() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Anonymous, "GET /post/5", "post/get/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "GET /post/4/around", "post/get_around/blacklisted").await?;
+        verify_response_with_user(UserRank::Regular, "POST /featured-post", "post/feature/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "POST /post-merge", "post/merge/blacklisted").await?;
+        verify_response_with_user(UserRank::Regular, "POST /post/5/favorite", "post/favorite/blacklisted").await?;
+        verify_response_with_user(UserRank::Regular, "PUT /post/5/score", "post/rate/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "PUT /post/5", "post/edit/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "DELETE /post/5", "post/delete/blacklisted").await?;
+        verify_response_with_user(UserRank::Regular, "DELETE /post/5/favorite", "post/unfavorite/blacklisted").await
     }
 
     #[tokio::test]
@@ -1918,14 +1931,16 @@ mod test {
         verify_response("PUT /post/1", "post/edit/malicious_thumbnail_token").await
     }
 
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
     async fn convert_to_jxl() -> ApiResult<()> {
         const POST_ID: i64 = 4;
-        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl").await?;
+        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl/typical").await?;
         reset_database();
         Ok(())
     }
+
 
     #[tokio::test]
     #[parallel]
@@ -1933,17 +1948,19 @@ mod test {
         verify_response_with_user(
             UserRank::Power,
             &format!("POST /post/4/convert-to-jxl/?{FIELDS}"),
-            "post/convert_to_jxl_denied",
+            "post/convert_to_jxl/unauthorized",
         )
         .await
     }
+
 
     #[tokio::test]
     #[parallel]
     async fn convert_to_jxl_unsupported() -> ApiResult<()> {
         const POST_ID: i64 = 5;
-        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl_unsupported").await
+        verify_response(&format!("POST /post/{POST_ID}/convert-to-jxl/?{FIELDS}"), "post/convert_to_jxl/unsupported").await
     }
+
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
@@ -1953,7 +1970,7 @@ mod test {
         let phash_before: Option<i64> = post::table.find(POST_ID).select(post::phash).first(&mut conn)?;
         assert_eq!(phash_before, None);
 
-        verify_response(&format!("POST /post/{POST_ID}/recompute-phash/?{FIELDS}"), "post/recompute_phash").await?;
+        verify_response(&format!("POST /post/{POST_ID}/recompute-phash/?{FIELDS}"), "post/recompute_phash/typical").await?;
 
         let phash_after: Option<i64> = post::table.find(POST_ID).select(post::phash).first(&mut conn)?;
         assert!(phash_after.is_some());
@@ -1964,19 +1981,22 @@ mod test {
         Ok(())
     }
 
+
     #[tokio::test]
     #[parallel]
     async fn recompute_phash_insufficient_privileges() -> ApiResult<()> {
-        verify_response_with_user(UserRank::Power, &format!("POST /post/4/recompute-phash/?{FIELDS}"), "post/recompute_phash_denied")
+        verify_response_with_user(UserRank::Power, &format!("POST /post/4/recompute-phash/?{FIELDS}"), "post/recompute_phash/unauthorized")
             .await
     }
+
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     #[serial]
     async fn regenerate_thumbnail() -> ApiResult<()> {
         const POST_ID: i64 = 4;
-        verify_response(&format!("POST /post/{POST_ID}/regenerate-thumbnail/?{FIELDS}"), "post/regenerate_thumbnail").await
+        verify_response(&format!("POST /post/{POST_ID}/regenerate-thumbnail/?{FIELDS}"), "post/regenerate_thumbnail/typical").await
     }
+
 
     #[tokio::test]
     #[parallel]
@@ -1984,7 +2004,7 @@ mod test {
         verify_response_with_user(
             UserRank::Power,
             &format!("POST /post/4/regenerate-thumbnail/?{FIELDS}"),
-            "post/regenerate_thumbnail_denied",
+            "post/regenerate_thumbnail/unauthorized",
         )
         .await
     }

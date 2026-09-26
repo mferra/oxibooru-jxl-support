@@ -545,8 +545,15 @@ mod test {
             "GET /comments/?query=-sort:id&limit=9&fields=id",
             "comment/list/with_preferences",
         )
-        .await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /comment/1", "comment/get/with_preferences").await
+        .await
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn blacklisted() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Anonymous, "GET /comment/1", "comment/get/blacklisted").await?;
+        verify_response_with_user(UserRank::Regular, "PUT /comment/1/score", "comment/rate/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "DELETE /comment/1", "comment/delete/blacklisted").await
     }
 
     #[tokio::test]

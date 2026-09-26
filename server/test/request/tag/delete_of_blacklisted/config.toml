@@ -1,5 +1,0 @@
-[anonymous_preferences]
-tag_blacklist = ["tagme"]
-
-[public_info.privileges]
-tag_delete = "anonymous"

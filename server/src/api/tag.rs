@@ -795,17 +795,10 @@ mod test {
             "tag/list/with_preferences",
         )
         .await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /tag/tagme", "tag/get/with_preferences").await?;
         verify_response_with_user(
             UserRank::Anonymous,
             "GET /tag-siblings/rock/?fields=names,implications,suggestions",
             "tag/get_siblings/with_preferences",
-        )
-        .await?;
-        verify_response_with_user(
-            UserRank::Anonymous,
-            "GET /tag-siblings/rock/?fields=names,implications,suggestions",
-            "tag/get_siblings/of_blacklisted",
         )
         .await?;
         verify_response_with_user(
@@ -817,6 +810,21 @@ mod test {
 
         reset_database();
         Ok(())
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn blacklisted() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Anonymous, "GET /tag/tagme", "tag/get/blacklisted").await?;
+        verify_response_with_user(
+            UserRank::Anonymous,
+            "GET /tag-siblings/rock/?fields=names,implications,suggestions",
+            "tag/get_siblings/blacklisted",
+        )
+        .await?;
+        verify_response_with_user(UserRank::Anonymous, "PUT /tag/tagme", "tag/edit/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "POST /tag-merge", "tag/merge/blacklisted").await?;
+        verify_response_with_user(UserRank::Anonymous, "DELETE /tag/tagme", "tag/delete/blacklisted").await
     }
 
     #[tokio::test]

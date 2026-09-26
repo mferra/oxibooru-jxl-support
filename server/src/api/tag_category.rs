@@ -476,8 +476,23 @@ mod test {
             "GET /tag-categories/?fields=name",
             "tag_category/list/with_preferences",
         )
+        .await
+    }
+
+    #[tokio::test]
+    #[parallel]
+    async fn blacklisted() -> ApiResult<()> {
+        verify_response_with_user(UserRank::Anonymous, "GET /tag-category/meta", "tag_category/get/blacklisted")
+            .await?;
+        verify_response_with_user(UserRank::Anonymous, "PUT /tag-category/meta", "tag_category/edit/blacklisted")
+            .await?;
+        verify_response_with_user(
+            UserRank::Anonymous,
+            "PUT /tag-category/meta/default",
+            "tag_category/set_default/blacklisted",
+        )
         .await?;
-        verify_response_with_user(UserRank::Anonymous, "GET /tag-category/meta", "tag_category/get/with_preferences")
+        verify_response_with_user(UserRank::Anonymous, "DELETE /tag-category/meta", "tag_category/delete/blacklisted")
             .await
     }
 

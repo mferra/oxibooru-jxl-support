@@ -82,6 +82,7 @@ mod test {
     #[tokio::test]
     #[parallel]
     async fn unauthorized() -> ApiResult<()> {
-        verify_response_with_user(UserRank::Regular, "GET /snapshots?limit=1", "snapshot/list_unauthorized").await
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "GET /snapshots?limit=1", "snapshot/list_unauthorized").await
     }
 }

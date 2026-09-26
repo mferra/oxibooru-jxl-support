@@ -97,9 +97,8 @@ mod test {
     #[tokio::test]
     #[parallel]
     async fn unauthorized() -> ApiResult<()> {
-        // upload_create stays at its default "regular" rank, but upload_use_downloader
-        // defaults to "power" — a regular user can reach the URL-download codepath via
-        // upload_create but must still be rejected by the higher downloader privilege.
-        verify_response_with_user(UserRank::Regular, "POST /uploads", "upload/download_unauthorized").await
+        const USER: UserRank = UserRank::Regular;
+        verify_response_with_user(USER, "POST /uploads", "upload/create_unauthorized").await?;
+        verify_response_with_user(USER, "POST /uploads", "upload/download_unauthorized").await
     }
 }
