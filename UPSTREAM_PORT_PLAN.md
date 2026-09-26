@@ -4,10 +4,12 @@ Internal tracking doc for reconciling upstream `oxibooru` fixes into this fork's
 `main` branch. Not part of the published docs site.
 
 - Fork point (merge-base): `f39cbfdda11631a99d52e5ea38c4419ecf93449f`
-- `master` (upstream mirror): 127 commits ahead of the fork point, not yet ported
-- `main` (this fork): 40 own commits (JXL, pHash, CBZ pools, admin maintenance actions, SSRF hardening)
+- `master` (upstream mirror): synced through `0e9a7da0` (2026-09-20), see "Round 2" below
+- `main` (this fork): own work on JXL, pHash, CBZ pools, admin maintenance actions, SSRF hardening, FFmpeg handling
 
 ## Strategy
+
+(Round 1, items 1–8 below. Round 2 switched to per-commit cherry-picks; see its section.)
 
 **No full `git merge`/rebase of `master` into `main`.** The custom JXL/pHash/CBZ
 work heavily diverges from upstream in `content/decode.rs`, `download.rs`,
@@ -155,6 +157,79 @@ container (`cargo check` clean after removing the one now-unused `tag.rs` import
 users"` — across ~80 unrelated tests, not caused by these changes; a rerun with `--test-threads=2` passed
 115/115 cleanly, including all four `preferences()` tests carrying the new fixtures). Container destroyed
 after (`stop`/`rm -f`/`rmi -f`/`system prune -f`).
+
+## Round 2 (2026-09-27) — bulk cherry-pick of `master` through `0e9a7da0`
+
+Round 1 (items 1–8 above) ported upstream fixes by hand. By September upstream had
+161 commits past the fork point, so round 2 switched to `git cherry-pick -x` of every
+wanted upstream commit, oldest first, resolving each conflict against `main`'s code.
+Each upstream commit is kept as its own commit on `main` with its
+`(cherry picked from commit …)` trailer, so `git log --grep 'cherry picked from'`
+lists what has been taken.
+
+- **Last synced upstream commit: `0e9a7da0`** (2026-09-20). The next round starts from
+  `git log --reverse --no-merges 0e9a7da0..master`.
+- 101 upstream commits applied, plus fork-side follow-up commits for tests and config.
+- Verified in podman (`rust:1.95-bookworm` + PostgreSQL 15): `cargo check`/`clippy` clean of errors,
+  **150/150 tests passing** (123 before the round), client bundle builds with esbuild.
+
+### Not ported, and why
+
+| Upstream commit(s) | Reason |
+|---|---|
+| `846b656c` `d9107f2c` `81287297` `2ee0b375` `de6b69ed` `e49e3f65` `698ca3ff` `c616fd1c` `9cc21ee7` `e8d13f3f` `b9453912` `1fadaee0` `2c00f3c2` `c655b70c` `4740805f` `8e36712a` `e8d6c4a5` `f72a108b` `fc365f13` `75ec1b14` `571790bb` | Already ported in round 1 (items 1–8) or equivalent fix already on `main` |
+| `f6c83a24` `4140ad2b` `8c6f4607` `70f6865b` `9ca69382` `bc53c4bc` `24dc009a` `90832f46` | `ffmpeg-sidecar` fixes; `main` dropped the sidecar for its own `content::ffmpeg` (timeouts, reaping, stdout draining) |
+| `3d734b84` `37f7111c` `7f024d08` `99c018ff` `eea86886` `7b57f9c1` `c8eb8c25` `88ae0907` `78439da8` `cb20cc83` `7d3d38f5` `d232f50c` `83249cf3` `2f242b31` `3893b708` `4c77ab4c` `ae9767d8` `aee5d1bf` `587f034c` `0e9a7da0` `24c9fdff` | PDF / `Document` post type — decided not to port for now (new `hayro` deps, new post type) |
+| `3db55f0c` `738983c7` `abfbbb3b` | Upstream JPEG XL decoding through the `jxl` crate; `main` keeps jxl-oxide (decode) + libjxl (encode) |
+| `5ab9b5fd` `b3106342` | Merge/version bump, empty test fix |
+| `9ceb2cd1` `8ca37c38` | Empty after conflict resolution (`main` already had the result) |
+
+### Deliberate divergences from upstream
+
+- **Downloader**: `main` keeps its own SSRF-hardened downloader (per-request client pinned
+  to a validated address, http+https, `allow_lan_archive_downloads` for CBZ URLs) instead
+  of upstream's shared client with a filtering DNS resolver (https only). The
+  `downloader` field from `1d37d126` was not added to `AppState`. The `[limits]`
+  download settings (`download_timeout_minutes`, `download_connect_timeout_seconds`,
+  `max_download_redirects`, `max_upload_size`) are wired into it; the overall download
+  timeout therefore went from a hard-coded 60 s to 10 min.
+- **FFmpeg**: `main`'s `content::ffmpeg` stays. Upstream's `--ffmpeg-path` argument and
+  `limits.ffmpeg_timeout_seconds` are applied through `content::ffmpeg::configure` at
+  startup. `FFMPEG_TIMEOUT` (env) still overrides the config value; the dist default is
+  120 s (upstream uses 60 s).
+- **`max_image_allocation` default stays at 256MB** (upstream raised it to 1GB in
+  `dcdff3ba`). jxl-oxide peaks at roughly 9x the output size while decoding, so 1GB
+  would bring back the out-of-memory risk fixed in `ce9e2f1e`.
+- **Custom thumbnail detection** now follows upstream's `dae78aeb`: `PostHash` decides
+  between custom and generated thumbnail from `custom_thumbnail_size` instead of the
+  filesystem, and `main`'s per-bucket `read_dir` batching was removed. **After
+  deploying, run the `reset_thumbnail_sizes` admin task once**, so posts whose size was
+  zeroed by the old save bug (fixed in item 7) show their custom thumbnail again.
+- **EXIF orientation** (`a3e088e3`) is applied in `main`'s `decode::image`, which also
+  feeds `convert_posts_to_jxl` and upload transcoding. Before this, JXL conversion
+  dropped the orientation of rotated JPEGs and deleted the original, so posts already
+  converted from such JPEGs stay sideways and can only be fixed by hand or from a backup.
+- `server/Dockerfile`, `docker-compose.yml` and `README.md` keep `main`'s versions.
+- `api/user.rs` / `api/comment.rs` keep `main`'s action-based own/any privilege checks
+  (see 6b and 6e); only the ordering fix from `f8647769` (privileges before version) was
+  applied on top.
+- `ProgressReporter` (`11429f10`) now reports on drop; `main`'s own admin tasks were
+  given levels (`WARN` for failure counters) and their explicit final `report()` calls
+  were removed.
+
+### Tests
+
+The `mod test` blocks of `server/src/api/*.rs` and the `server/test/request` tree match
+upstream's final layout (`<resource>/<action>/<case>`, from `3f5ed51c`). Fork-only tests
+were moved into it:
+
+- `post/list/similar_{filtered,sorted}` (the `similar:` token)
+- `post/convert_to_jxl/{typical,unauthorized,unsupported}`
+- `post/recompute_phash/{typical,unauthorized}`
+- `post/regenerate_thumbnail/{typical,unauthorized}`
+
+`main`'s own round-1 fixtures for the blacklist and view-privilege checks (items 6 and
+8) were replaced by upstream's equivalents (`*/blacklisted`, `*/view_unauthorized`).
 
 ## Known merge-conflict hotspots
 
