@@ -320,7 +320,7 @@ For cron/CI use, pass the task name directly to run it once, non-interactively, 
 | `reset_filenames`       | Rebuild the data directory layout                               |
 | `reset_statistics`      | Rebuild table statistics                                        |
 | `reset_thumbnail_sizes` | Re-cache thumbnail dimensions                                   |
-| `find_orphan_files`     | List post files and thumbnails that no post uses (deletes nothing) |
+| `find_orphan_files`     | List post files and thumbnails that no post uses, optionally deleting them |
 | `convert_posts_to_jxl`  | Re-encode static image posts as JXL and regenerate thumbnails   |
 | `calculate_phash`       | Compute perceptual hash for posts that don't have one yet       |
 | `merge_duplicate_posts` | Merge related posts whose content is pixel-identical            |
@@ -362,7 +362,7 @@ Leave the post selection blank to process every post without a pHash, or enter a
 
 ### `find_orphan_files`
 
-Scans the `posts`, `generated-thumbnails` and `custom-thumbnails` directories and lists every file no post uses. It only reports and never deletes. With `delete_source_files = false`, deleted and merged posts leave their files behind, and so do JXL conversions and thumbnail format changes; this task finds them.
+Scans the `posts`, `generated-thumbnails` and `custom-thumbnails` directories and lists every file no post uses, then offers to delete them. With `delete_source_files = false`, deleted and merged posts leave their files behind, and so do JXL conversions and thumbnail format changes; this task finds them.
 
 Each file is classified as one of:
 
@@ -370,7 +370,17 @@ Each file is classified as one of:
 - `stale`: the post exists but uses a different file, such as the original left behind by a JXL conversion, a thumbnail in a format that is no longer configured, or a name from before a `content_secret` change (run `reset_filenames` for those).
 - `unrecognized-name`: the file name doesn't start with a post ID.
 
-At the prompt, enter a file path to write the list to, one `<kind><TAB><path>` line per file, or leave it blank to print each orphan to the log. Either way, the task finishes with a count and total size per kind. Pick a path outside the data directory so the report isn't served over HTTP. The non-interactive form (`--admin find_orphan_files`) only logs.
+At the prompt, enter a file path to write the list to, one `<kind><TAB><path>` line per file, or leave it blank to print each orphan to the log. Either way, the scan finishes with a count and total size per kind. Pick a path outside the data directory so the report isn't served over HTTP.
+
+Next, the task asks which kinds to delete: a comma-separated list such as `no-post, stale`, or `all`. A blank answer keeps everything. It then shows how many files and MiB that is, and deletes only if you type `delete`. The non-interactive form (`--admin find_orphan_files`) never deletes.
+
+The server keeps running while the task works, so each file is checked again right before it is deleted. It is kept if:
+
+- it was modified in the last hour (it may belong to an upload or conversion in progress);
+- it is `no-post` but a post with its ID exists now;
+- it is `stale` but its post now uses it, no longer exists, or doesn't have its own file. In that last case the stale file may be the only copy, such as content named for an old `content_secret` or a custom thumbnail saved in the previous thumbnail format.
+
+Every kept file is logged with the reason. Empty directories are left in place.
 
 ### `merge_duplicate_phash_posts`
 

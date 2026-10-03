@@ -99,7 +99,7 @@ pub enum AdminTask {
     ResetStatistics,
     #[strum(message = "Cache thumbnail sizes")]
     ResetThumbnailSizes,
-    #[strum(message = "List files in the post data directories that no post uses (report only, deletes nothing)")]
+    #[strum(message = "List files in the post data directories that no post uses, optionally deleting them")]
     FindOrphanFiles,
     #[strum(message = "Re-encode image posts as JXL and regenerate thumbnails")]
     ConvertPostsToJxl,
