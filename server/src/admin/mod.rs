@@ -16,7 +16,6 @@ use tracing::{Level, debug, error, info, trace, warn};
 
 pub mod database;
 mod input;
-pub mod pool;
 pub mod post;
 mod user;
 
@@ -110,8 +109,6 @@ pub enum AdminTask {
     MergeDuplicatePosts,
     #[strum(message = "Merge still images sharing a pHash (highest resolution, then JXL, then smaller file, wins)")]
     MergeDuplicatePhashPosts,
-    #[strum(message = "Import a CBZ archive as a pool, matching pages against existing posts")]
-    ImportCbzAsPool,
 }
 
 /// Returns the task name passed immediately after `--admin`, if any (e.g. `--admin recompute_index`).
@@ -292,7 +289,6 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::RecalculatePhashTotal => post::recalculate_phash_total(state, post_editor),
         AdminTask::MergeDuplicatePosts => post::merge_duplicate_posts(state, post_editor),
         AdminTask::MergeDuplicatePhashPosts => post::merge_duplicate_phash_posts(state, post_editor),
-        AdminTask::ImportCbzAsPool => pool::import_cbz_as_pool(state, post_editor),
     }
 }
 

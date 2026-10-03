@@ -165,12 +165,6 @@ impl FromSql<Citext, Pg> for SmallString {
 #[schema(value_type = String, description = "")]
 pub struct LargeString(Arc<str>);
 
-impl From<String> for LargeString {
-    fn from(value: String) -> Self {
-        Self(Arc::from(value))
-    }
-}
-
 impl Deref for LargeString {
     type Target = str;
     fn deref(&self) -> &Self::Target {

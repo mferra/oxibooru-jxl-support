@@ -42,7 +42,7 @@ pub fn routes(state: AppState) -> OpenApiRouter {
         .merge(info::routes())
         .merge(legacy::routes())
         .merge(password_reset::routes())
-        .merge(pool::routes(upload_limit))
+        .merge(pool::routes())
         .merge(pool_category::routes())
         .merge(post::routes(upload_limit))
         .merge(snapshot::routes())

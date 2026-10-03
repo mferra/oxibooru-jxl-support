@@ -5,7 +5,8 @@ Internal tracking doc for reconciling upstream `oxibooru` fixes into this fork's
 
 - Fork point (merge-base): `f39cbfdda11631a99d52e5ea38c4419ecf93449f`
 - `master` (upstream mirror): synced through `0e9a7da0` (2026-09-20), see "Round 2" below
-- `main` (this fork): own work on JXL, pHash, CBZ pools, admin maintenance actions, SSRF hardening, FFmpeg handling
+- `main` (this fork): own work on JXL, pHash, admin maintenance actions, SSRF hardening, FFmpeg handling
+- CBZ import (`comic.rs`, `POST /pool-from-archive`, `import_cbz_as_pool`, `allow_lan_archive_downloads`) was removed from `main` on 2026-10-03; the pool reader stayed. Mentions of CBZ below are historical.
 
 ## Strategy
 
@@ -187,7 +188,7 @@ lists what has been taken.
 ### Deliberate divergences from upstream
 
 - **Downloader**: `main` keeps its own SSRF-hardened downloader (per-request client pinned
-  to a validated address, http+https, `allow_lan_archive_downloads` for CBZ URLs) instead
+  to a validated address, http+https; it had an `allow_lan_archive_downloads` opt-in for CBZ URLs until CBZ import was removed) instead
   of upstream's shared client with a filtering DNS resolver (https only). The
   `downloader` field from `1d37d126` was not added to `AppState`. The `[limits]`
   download settings (`download_timeout_minutes`, `download_connect_timeout_seconds`,

@@ -7,7 +7,7 @@ use crate::content::thumbnail::ThumbnailCategory;
 use crate::content::upload::UploadToken;
 use crate::model::enums::MimeType;
 use axum::body::Bytes;
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
 use image::error::ImageError;
 use image::{DynamicImage, ImageResult};
 use std::collections::hash_map::Entry;
@@ -98,36 +98,6 @@ where
     writer.flush().await?;
 
     Ok(upload_token)
-}
-
-/// Saves a streamed archive (e.g. a CBZ) to the temporary uploads folder and
-/// returns its path. Archives never become post content, so they are stored
-/// with a generic `.zip` extension rather than an [`UploadToken`].
-///
-/// Like [`save_uploaded_file`], cleanup of failed or abandoned files is left
-/// to the temporary uploads cleanup task.
-pub async fn save_uploaded_archive<S, E>(config: &Config, mut stream: S) -> ApiResult<PathBuf>
-where
-    S: StreamExt<Item = Result<Bytes, E>> + Unpin,
-    ApiError: From<E>,
-{
-    const BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
-
-    std::fs::create_dir_all(config.path(Directory::TemporaryUploads))?;
-
-    let file_name = format!("{}.zip", uuid::Uuid::new_v4());
-    let archive_path = config.path(Directory::TemporaryUploads).join(file_name);
-
-    // Create a buffered writer to reduce frequency of syscalls when writing file
-    let file = File::create(&archive_path).await?;
-    let mut writer = BufWriter::with_capacity(BUFFER_CAPACITY, file);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        writer.write_all(&chunk).await?;
-    }
-    writer.flush().await?;
-
-    Ok(archive_path)
 }
 
 /// Saves custom avatar `thumbnail` for user with lowercase name `lowercase_username` to disk.

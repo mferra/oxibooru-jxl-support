@@ -9,7 +9,6 @@ use reqwest::header::{HeaderMap, HeaderValue, LOCATION, REFERER};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
@@ -63,9 +62,9 @@ fn is_shared_address_space(ip: Ipv4Addr) -> bool {
 /// Pinning to one validated address (via [`Client::resolve`] in the caller) prevents
 /// DNS-rebinding attacks, where the host would resolve to a safe address during
 /// validation but to an internal address at connection time.
-async fn resolve_validated_addr(host: &str, port: u16, allow_private: bool) -> ApiResult<SocketAddr> {
+async fn resolve_validated_addr(host: &str, port: u16) -> ApiResult<SocketAddr> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-    if !allow_private && addrs.iter().any(|addr| is_blocked_ip(addr.ip())) {
+    if addrs.iter().any(|addr| is_blocked_ip(addr.ip())) {
         return Err(forbidden_url("URL resolves to a disallowed address"));
     }
     addrs.into_iter().next().ok_or_else(|| forbidden_url("Could not resolve host"))
@@ -77,21 +76,21 @@ async fn resolve_validated_addr(host: &str, port: u16, allow_private: bool) -> A
 /// IP-literal hosts (e.g. `http://[::1]/`) are validated directly, since
 /// [`tokio::net::lookup_host`] doesn't accept the bracketed form `url::Url::host_str`
 /// returns for IPv6 literals and a literal address doesn't need DNS resolution anyway.
-async fn resolve_target(url: &Url, allow_private: bool) -> ApiResult<(String, SocketAddr)> {
+async fn resolve_target(url: &Url) -> ApiResult<(String, SocketAddr)> {
     let port = url.port_or_known_default().ok_or_else(|| forbidden_url("URL has no port"))?;
     match url.host() {
         Some(url::Host::Domain(domain)) => {
-            let addr = resolve_validated_addr(domain, port, allow_private).await?;
+            let addr = resolve_validated_addr(domain, port).await?;
             Ok((domain.to_owned(), addr))
         }
         Some(url::Host::Ipv4(ip)) => {
-            if !allow_private && is_blocked_ip(IpAddr::V4(ip)) {
+            if is_blocked_ip(IpAddr::V4(ip)) {
                 return Err(forbidden_url("URL points to a disallowed address"));
             }
             Ok((ip.to_string(), SocketAddr::new(IpAddr::V4(ip), port)))
         }
         Some(url::Host::Ipv6(ip)) => {
-            if !allow_private && is_blocked_ip(IpAddr::V6(ip)) {
+            if is_blocked_ip(IpAddr::V6(ip)) {
                 return Err(forbidden_url("URL points to a disallowed address"));
             }
             Ok((ip.to_string(), SocketAddr::new(IpAddr::V6(ip), port)))
@@ -115,8 +114,7 @@ fn build_client(config: &Config, host: &str, addr: SocketAddr, headers: HeaderMa
 }
 
 /// Fetches `url`, following redirects manually so each target can be validated.
-/// `allow_private` permits targets in private address ranges (e.g. a LAN file server).
-async fn fetch_response(config: &Config, mut url: Url, allow_private: bool) -> ApiResult<Response> {
+async fn fetch_response(config: &Config, mut url: Url) -> ApiResult<Response> {
     // Every redirect hop is a request, plus the initial one and the one-time retry with a Referer.
     let max_attempts = config.limits.max_download_redirects + 2;
 
@@ -127,7 +125,7 @@ async fn fetch_response(config: &Config, mut url: Url, allow_private: bool) -> A
             return Err(forbidden_url("Only http and https URLs are allowed"));
         }
 
-        let (host, addr) = resolve_target(&url, allow_private).await?;
+        let (host, addr) = resolve_target(&url).await?;
 
         let mut headers = HeaderMap::new();
         if add_referer {
@@ -183,21 +181,9 @@ fn limited_stream(response: Response, max_size: u64) -> ApiResult<impl Stream<It
 pub async fn from_url(ctx: &Context, url: Url) -> ApiResult<UploadToken> {
     ctx.verify_privilege(Action::UploadUseDownloader)?;
 
-    let response = fetch_response(&ctx.config, url, false).await?;
+    let response = fetch_response(&ctx.config, url).await?;
     let stream = limited_stream(response, u64::try_from(ctx.config.limits.max_upload_size).unwrap_or(u64::MAX))?;
     filesystem::save_uploaded_file(&ctx.config, stream).await
-}
-
-/// Downloads an archive (e.g. a CBZ) from `url` into the temporary uploads
-/// directory and returns its path. Unlike [`from_url`], the Content-Type is
-/// not validated, since archives never become post content. Private (LAN)
-/// targets are permitted when `allow_lan_archive_downloads` is enabled.
-pub async fn archive_from_url(ctx: &Context, url: Url) -> ApiResult<PathBuf> {
-    ctx.verify_privilege(Action::UploadUseDownloader)?;
-
-    let response = fetch_response(&ctx.config, url, ctx.config.allow_lan_archive_downloads).await?;
-    let stream = limited_stream(response, u64::try_from(ctx.config.limits.max_upload_size).unwrap_or(u64::MAX))?;
-    filesystem::save_uploaded_archive(&ctx.config, stream).await
 }
 
 #[cfg(test)]

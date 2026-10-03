@@ -2,7 +2,6 @@ mod admin;
 mod api;
 mod app;
 mod auth;
-mod comic;
 mod config;
 mod content;
 mod db;
