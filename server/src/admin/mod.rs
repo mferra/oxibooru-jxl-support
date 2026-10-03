@@ -99,6 +99,8 @@ pub enum AdminTask {
     ResetStatistics,
     #[strum(message = "Cache thumbnail sizes")]
     ResetThumbnailSizes,
+    #[strum(message = "List files in the post data directories that no post uses (report only, deletes nothing)")]
+    FindOrphanFiles,
     #[strum(message = "Re-encode image posts as JXL and regenerate thumbnails")]
     ConvertPostsToJxl,
     #[strum(message = "Compute perceptual hash (pHash) for posts that don't have one")]
@@ -284,6 +286,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::ResetFilenames => database::reset_filenames(state),
         AdminTask::ResetStatistics => database::reset_statistics(state),
         AdminTask::ResetThumbnailSizes => database::reset_thumbnail_sizes(state),
+        AdminTask::FindOrphanFiles => database::find_orphan_files(state, post_editor),
         AdminTask::ConvertPostsToJxl => post::convert_posts_to_jxl(state, post_editor),
         AdminTask::CalculatePhash => post::compute_phash(state, post_editor),
         AdminTask::RecalculatePhashTotal => post::recalculate_phash_total(state, post_editor),

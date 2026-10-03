@@ -1,3 +1,4 @@
+use crate::admin::input::{self, PostEditor};
 use crate::admin::{AdminResult, PRINT_INTERVAL, ProgressReporter};
 use crate::app::AppState;
 use crate::content::hash::PostHash;
@@ -11,10 +12,15 @@ use crate::schema::{
 };
 use crate::time::{DateTime, Timer};
 use crate::{admin, filesystem};
+use diesel::connection::DefaultLoadingMode;
 use diesel::dsl::{count, max, sum};
 use diesel::{ExpressionMethods, NullableExpressionMethods, QueryDsl, RunQueryDsl};
+use std::collections::HashMap;
 use std::ffi::OsStr;
-use tracing::{Level, error, warn};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use tracing::{Level, debug, error, info, warn};
 use walkdir::WalkDir;
 
 /// Renames post files and thumbnails.
@@ -116,6 +122,145 @@ pub fn reset_filenames_impl(state: &AppState) -> AdminResult<()> {
         }
     }
     Ok(())
+}
+
+/// Why a file in a post data directory counts as an orphan.
+#[derive(Clone, Copy)]
+enum OrphanKind {
+    /// The file name doesn't start with a post ID.
+    UnrecognizedName,
+    /// No post has the file's ID, e.g. a deleted or merged post whose file was kept.
+    NoPost,
+    /// The post exists but uses a different file, e.g. the original left behind by a JXL
+    /// conversion, a thumbnail in a format that is no longer configured, or a name that
+    /// predates a content secret change.
+    Stale,
+}
+
+impl OrphanKind {
+    const ALL: [Self; 3] = [Self::UnrecognizedName, Self::NoPost, Self::Stale];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::UnrecognizedName => "unrecognized-name",
+            Self::NoPost => "no-post",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+/// Directories holding per-post files, each with the path the post's file is expected at.
+const POST_FILE_DIRECTORIES: [(Directory, fn(&PostHash, MimeType) -> PathBuf); 3] = [
+    (Directory::Posts, |post_hash, mime_type| post_hash.content_path(mime_type)),
+    (Directory::GeneratedThumbnails, |post_hash, _| post_hash.generated_thumbnail_path()),
+    (Directory::CustomThumbnails, |post_hash, _| post_hash.custom_thumbnail_path()),
+];
+
+/// Files scanned between progress reports. Data directories can hold tens of millions of files.
+const ORPHAN_SCAN_PRINT_INTERVAL: Option<u64> = Some(100_000);
+
+/// Lists files in the post content, generated thumbnail, and custom thumbnail directories that
+/// no post uses. It only reports; nothing is moved or deleted.
+///
+/// With delete_source_files disabled, deleted and merged posts leave their files behind, and so
+/// do JXL conversions and thumbnail format changes. The list can optionally be written to a file,
+/// one `<kind>\t<path>` line per orphan.
+pub fn find_orphan_files(state: &AppState, editor: &mut PostEditor) {
+    let report_path = match input::read("File to write the orphan list to (leave blank to only log it): ", editor) {
+        Ok(path) => path.trim().to_owned(),
+        Err(err) => {
+            error!("{err}");
+            return;
+        }
+    };
+    let report_path = (!report_path.is_empty()).then(|| PathBuf::from(report_path));
+    if let Err(err) = find_orphan_files_impl(state, report_path.as_deref()) {
+        error!("{err}");
+    }
+}
+
+fn find_orphan_files_impl(state: &AppState, report_path: Option<&Path>) -> AdminResult<()> {
+    // Created before the scan so a bad path fails immediately rather than after hours of work.
+    let mut report = report_path.map(File::create).transpose()?.map(BufWriter::new);
+
+    let _timer = Timer::new("find_orphan_files");
+    let mime_types = load_post_mime_types(state)?;
+    info!("Loaded {} posts; scanning data directories", mime_types.len());
+
+    let scanned = ProgressReporter::new(Level::INFO, "Files scanned", ORPHAN_SCAN_PRINT_INTERVAL);
+    let mut counts = [0_u64; OrphanKind::ALL.len()];
+    let mut bytes = [0_u64; OrphanKind::ALL.len()];
+    for (directory, expected_path) in POST_FILE_DIRECTORIES {
+        let root = state.config.path(directory);
+        if !root.try_exists()? {
+            continue;
+        }
+
+        for entry in WalkDir::new(&root).sort_by_file_name() {
+            admin::is_cancelled()?;
+
+            let entry = entry?;
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            scanned.increment();
+
+            let path = entry.path();
+            let kind = match admin::get_post_id(path) {
+                None => OrphanKind::UnrecognizedName,
+                Some(post_id) => match mime_types.get(&post_id) {
+                    None => OrphanKind::NoPost,
+                    Some(&mime_type) => {
+                        if path == expected_path(&PostHash::new(&state.config, post_id, None), mime_type) {
+                            continue;
+                        }
+                        OrphanKind::Stale
+                    }
+                },
+            };
+
+            counts[kind as usize] += 1;
+            bytes[kind as usize] += entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            if let Some(report) = report.as_mut() {
+                writeln!(report, "{}\t{}", kind.label(), path.display())?;
+                debug!("Orphan file ({}): {}", kind.label(), path.display());
+            } else {
+                info!("Orphan file ({}): {}", kind.label(), path.display());
+            }
+        }
+    }
+
+    if let Some(mut report) = report {
+        report.flush()?;
+    }
+    drop(scanned);
+
+    const MIB: f64 = 1024.0 * 1024.0;
+    for kind in OrphanKind::ALL {
+        let (count, size) = (counts[kind as usize], bytes[kind as usize]);
+        info!("Orphan files ({}): {count} ({:.1} MiB)", kind.label(), size as f64 / MIB);
+    }
+    let total_size: u64 = bytes.iter().sum();
+    info!("Orphan files in total: {} ({:.1} MiB)", counts.iter().sum::<u64>(), total_size as f64 / MIB);
+    if let Some(report_path) = report_path {
+        info!("Orphan list written to {}", report_path.display());
+    }
+    Ok(())
+}
+
+/// Returns the MIME type of every post, keyed by post ID. Streamed so that only the map, not an
+/// intermediate list, has to fit in memory.
+fn load_post_mime_types(state: &AppState) -> AdminResult<HashMap<i64, MimeType>> {
+    let mut conn = state.connection_pool.get_blocking()?;
+    let mut mime_types = HashMap::new();
+    for row in post::table
+        .select((post::id, post::mime_type))
+        .load_iter::<(i64, MimeType), DefaultLoadingMode>(&mut conn)?
+    {
+        let (post_id, mime_type) = row?;
+        mime_types.insert(post_id, mime_type);
+    }
+    Ok(mime_types)
 }
 
 /// Updates database values for thumbnail size.
@@ -473,4 +618,54 @@ pub fn reset_statistics_impl(state: &AppState) -> AdminResult<()> {
     }
     reset_thumbnail_sizes_impl(state)?;
     reset_relation_stats(state)
+}
+
+#[cfg(test)]
+mod test {
+    use super::find_orphan_files_impl;
+    use crate::admin::AdminResult;
+    use crate::content::hash::PostHash;
+    use crate::filesystem::Directory;
+    use crate::model::enums::MimeType;
+    use crate::test::*;
+    use serial_test::serial;
+    use std::path::Path;
+
+    #[test]
+    #[serial]
+    fn find_orphan_files() -> AdminResult<()> {
+        let state = get_state();
+        let config = &state.config;
+        let plant = |path: &Path| -> std::io::Result<()> {
+            std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")))?;
+            std::fs::write(path, b"orphan")
+        };
+
+        // Post 1 is a JPEG, so a PNG beside it is the kind of file a JXL conversion leaves behind.
+        let stale = PostHash::new(config, 1, None).content_path(MimeType::Png);
+        let no_post = PostHash::new(config, 999, None).content_path(MimeType::Jpeg);
+        let no_post_thumbnail = PostHash::new(config, 999, None).generated_thumbnail_path();
+        let unrecognized = config.path(Directory::Posts).join("notes.txt");
+        for path in [&stale, &no_post, &no_post_thumbnail, &unrecognized] {
+            plant(path)?;
+        }
+
+        let report_path = config.data_dir.join("orphans.txt");
+        find_orphan_files_impl(&state, Some(&report_path))?;
+
+        let report = std::fs::read_to_string(&report_path)?;
+        let mut lines: Vec<&str> = report.lines().collect();
+        lines.sort_unstable();
+        let mut expected = vec![
+            format!("stale\t{}", stale.display()),
+            format!("no-post\t{}", no_post.display()),
+            format!("no-post\t{}", no_post_thumbnail.display()),
+            format!("unrecognized-name\t{}", unrecognized.display()),
+        ];
+        expected.sort_unstable();
+        assert_eq!(lines, expected, "files used by existing posts must not be reported");
+
+        reset_database();
+        Ok(())
+    }
 }
