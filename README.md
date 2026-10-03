@@ -322,6 +322,8 @@ For cron/CI use, pass the task name directly to run it once, non-interactively, 
 | `reset_thumbnail_sizes` | Re-cache thumbnail dimensions                                   |
 | `convert_posts_to_jxl`  | Re-encode static image posts as JXL and regenerate thumbnails   |
 | `calculate_phash`       | Compute perceptual hash for posts that don't have one yet       |
+| `merge_duplicate_posts` | Merge related posts whose content is pixel-identical            |
+| `merge_duplicate_phash_posts` | Merge still-image posts that share the exact same pHash   |
 
 ### `regenerate_thumbnails`
 
@@ -356,6 +358,19 @@ Select posts (leave blank to select all, enter "done" when finished):
 ```
 
 Leave the post selection blank to process every post without a pHash, or enter a search query to restrict — for example `type:image` to process only static images first.
+
+### `merge_duplicate_phash_posts`
+
+Merges still-image posts whose pHash is exactly equal. Run it after `merge_duplicate_posts`, which only merges pixel-identical pairs; this task also catches the same picture saved at another resolution or quality.
+
+In each group of posts sharing a pHash, the post with the highest resolution survives. On equal resolution a JXL post wins, then the smaller file, then the lower ID. The others are merged into it: tags, pools, scores, favorites, comments, descriptions and relations move to the survivor, and each merge is recorded as a snapshot. The survivor keeps its own file.
+
+An equal pHash is strong but not conclusive evidence, so two safeguards apply:
+
+- Posts whose aspect ratio differs from the survivor's by more than 2% are skipped (crops, letterboxed or stretched copies).
+- Groups of more than 20 posts are skipped and logged. Low-detail images such as blank pages or solid fills tend to collide on one hash.
+
+Posts without a pHash are ignored, so run `calculate_phash` first. Restrict the post selection with a query to try it on a subset before running it on everything.
 
 ---
 

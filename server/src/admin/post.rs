@@ -18,7 +18,7 @@ use crate::search::Builder;
 use crate::search::post::{QueryBuilder, Token};
 use crate::time::{DateTime, Timer};
 use crate::{admin, snapshot, update};
-use diesel::dsl::exists;
+use diesel::dsl::{count_star, exists};
 use diesel::{
     Connection, ExpressionMethods, Insertable, OptionalExtension, PgConnection, QueryDsl, QueryResult, RunQueryDsl,
     SelectableHelper,
@@ -999,6 +999,206 @@ fn merge_pair_if_duplicate(
     }
 }
 
+/// pHash groups with more posts than this are skipped rather than merged. Many posts sharing one
+/// 64-bit hash usually means a low-detail kind of image (blank pages, solid fills, plain text)
+/// whose hashes collide, not reposts of the same picture.
+const MAX_PHASH_GROUP_SIZE: usize = 20;
+
+/// Maximum relative difference between two posts' aspect ratios for them to count as the same
+/// picture. pHash squashes every image to 32×32, so on its own it can't tell a crop or a
+/// stretched copy from the original.
+const ASPECT_RATIO_TOLERANCE: f64 = 0.02;
+
+/// Merges still-image posts that share the exact same pHash.
+///
+/// Meant to run after merge_duplicate_posts. That task only merges pixel-identical pairs; this
+/// one also catches the same picture saved at another resolution or quality. An equal pHash is
+/// strong but not conclusive evidence, so posts are only merged when both are still images with
+/// matching aspect ratios, and groups larger than [`MAX_PHASH_GROUP_SIZE`] are skipped.
+///
+/// Merge policy: in each group the post with the highest resolution survives; on equal
+/// resolution JXL is preferred, then the smaller file, then the lower ID. Every other post in
+/// the group is merged into the survivor via the same logic as the post merge API, including a
+/// merge snapshot for auditing. The survivor keeps its own content file.
+pub fn merge_duplicate_phash_posts(state: &AppState, editor: &mut PostEditor) {
+    input::user_input_loop(state, editor, |state: &AppState, editor: &mut PostEditor| {
+        let post_ids = user_query(state, editor)?;
+        let selected: HashSet<i64> = post_ids.into_iter().collect();
+
+        let _timer = Timer::new("merge_duplicate_phash_posts");
+        let merged = ProgressReporter::new(Level::INFO, "Posts merged", PRINT_INTERVAL);
+        let mismatched = ProgressReporter::new(Level::INFO, "Posts skipped (aspect ratio differs from survivor)", None);
+        let oversized = ProgressReporter::new(Level::INFO, "pHash groups skipped (too many posts)", None);
+        let failed = ProgressReporter::new(Level::WARN, "Merges failed", None);
+
+        let groups = phash_groups(state)?;
+        info!("Examining {} groups of image posts sharing a pHash", groups.len());
+
+        // Merges mutate many shared tables, so groups are processed sequentially.
+        for group in groups {
+            admin::is_cancelled()?;
+            let group: Vec<Post> = group.into_iter().filter(|post| selected.contains(&post.id)).collect();
+            if group.len() < 2 {
+                continue;
+            }
+            if group.len() > MAX_PHASH_GROUP_SIZE {
+                warn!(
+                    "Skipped {} posts sharing pHash {:016x} (first post {}): too many to be copies of one picture",
+                    group.len(),
+                    group[0].phash.unwrap_or_default(),
+                    group[0].id,
+                );
+                oversized.increment();
+                continue;
+            }
+            merge_phash_group(state, group, &merged, &mismatched, &failed)?;
+        }
+
+        if !state.config.delete_source_files {
+            info!(
+                "delete_source_files is disabled, so absorbed posts' files were left on disk. \
+                 Enable it in config.toml for merges to free disk space."
+            );
+        }
+        Ok(())
+    });
+}
+
+/// Returns every still-image post whose pHash is shared with at least one other still image,
+/// grouped by pHash.
+fn phash_groups(state: &AppState) -> AdminResult<Vec<Vec<Post>>> {
+    let mut conn = state.connection_pool.get_blocking()?;
+    let shared_phashes: Vec<Option<i64>> = post::table
+        .select(post::phash)
+        .filter(post::phash.is_not_null())
+        .filter(post::type_.eq(PostType::Image))
+        .group_by(post::phash)
+        .having(count_star().gt(1))
+        .load(&mut conn)?;
+    let shared_phashes: Vec<i64> = shared_phashes.into_iter().flatten().collect();
+
+    let mut groups: Vec<Vec<Post>> = Vec::new();
+    for chunk in shared_phashes.chunks(METADATA_CHUNK_SIZE) {
+        admin::is_cancelled()?;
+
+        let posts: Vec<Post> = post::table
+            .select(Post::as_select())
+            .filter(post::phash.eq_any(chunk))
+            .filter(post::type_.eq(PostType::Image))
+            .order((post::phash, post::id))
+            .load(&mut conn)?;
+        for post in posts {
+            match groups.last_mut() {
+                Some(group) if group[0].phash == post.phash => group.push(post),
+                _ => groups.push(vec![post]),
+            }
+        }
+    }
+    Ok(groups)
+}
+
+/// Merges every post of a pHash `group` into the group's preferred post.
+fn merge_phash_group(
+    state: &AppState,
+    mut group: Vec<Post>,
+    merged: &ProgressReporter,
+    mismatched: &ProgressReporter,
+    failed: &ProgressReporter,
+) -> AdminResult<()> {
+    group.sort_by(phash_merge_preference);
+    let mut group = group.into_iter();
+    let Some(survivor) = group.next() else {
+        return Ok(());
+    };
+
+    for absorbed in group {
+        admin::is_cancelled()?;
+        if !aspect_ratios_match(&survivor, &absorbed) {
+            info!(
+                "Posts {} ({}x{}) and {} ({}x{}): skipped — same pHash but different aspect ratio",
+                survivor.id, survivor.width, survivor.height, absorbed.id, absorbed.width, absorbed.height,
+            );
+            mismatched.increment();
+            continue;
+        }
+        merge_into_phash_survivor(state, survivor.id, &absorbed, merged, failed);
+    }
+    Ok(())
+}
+
+/// Merges `absorbed` into the post `survivor_id`, keeping the survivor's content.
+fn merge_into_phash_survivor(
+    state: &AppState,
+    survivor_id: i64,
+    absorbed: &Post,
+    merged: &ProgressReporter,
+    failed: &ProgressReporter,
+) {
+    let absorbed_id = absorbed.id;
+    let mut conn = match state.connection_pool.get_blocking() {
+        Ok(conn) => conn,
+        Err(err) => {
+            error!(
+                "Cannot merge post {absorbed_id} into post {survivor_id}: could not get a database connection: {err}"
+            );
+            failed.increment();
+            return;
+        }
+    };
+
+    let merge_result: ApiResult<Post> = conn.transaction(|conn| {
+        // Reloaded on every merge: an earlier merge in the same group changed the survivor's
+        // description, and merging from a stale copy would drop what it added.
+        let survivor: Post = post::table.find(survivor_id).select(Post::as_select()).first(conn)?;
+        update::post::merge(conn, &state.config, absorbed, &survivor, false)?;
+        snapshot::post::merge_snapshot(conn, admin::client(), absorbed_id, survivor_id)?;
+        Ok(survivor)
+    });
+    match merge_result {
+        Ok(survivor) => {
+            info!(
+                "Merged post {absorbed_id} ({}, {}x{}, {} B) into post {survivor_id} ({}, {}x{}, {} B)",
+                absorbed.mime_type,
+                absorbed.width,
+                absorbed.height,
+                absorbed.file_size,
+                survivor.mime_type,
+                survivor.width,
+                survivor.height,
+                survivor.file_size,
+            );
+            merged.increment();
+        }
+        Err(err) => {
+            error!("Failed to merge post {absorbed_id} into post {survivor_id}: {err}");
+            failed.increment();
+        }
+    }
+}
+
+/// Orders posts so the one that should survive a pHash merge comes first: highest resolution,
+/// then JXL, then the smaller file, then the lower ID.
+fn phash_merge_preference(a: &Post, b: &Post) -> Ordering {
+    let pixel_count = |post: &Post| i64::from(post.width) * i64::from(post.height);
+    let is_jxl = |post: &Post| post.mime_type == MimeType::Jxl;
+    pixel_count(b)
+        .cmp(&pixel_count(a))
+        .then_with(|| is_jxl(b).cmp(&is_jxl(a)))
+        .then_with(|| a.file_size.cmp(&b.file_size))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Returns whether two posts' aspect ratios are within [`ASPECT_RATIO_TOLERANCE`] of each other.
+/// Posts with unknown (non-positive) dimensions never match.
+fn aspect_ratios_match(a: &Post, b: &Post) -> bool {
+    if a.width <= 0 || a.height <= 0 || b.width <= 0 || b.height <= 0 {
+        return false;
+    }
+    let ratio_a = f64::from(a.width) / f64::from(a.height);
+    let ratio_b = f64::from(b.width) / f64::from(b.height);
+    (ratio_a - ratio_b).abs() <= ASPECT_RATIO_TOLERANCE * ratio_a.max(ratio_b)
+}
+
 /// Decodes a post's generated thumbnail. Thumbnails on disk may predate a thumbnail
 /// format config change, so the configured format is tried first and then the other
 /// known format.
@@ -1114,5 +1314,112 @@ fn user_query(state: &AppState, editor: &mut PostEditor) -> AdminResult<Vec<i64>
                 return Ok(post_ids);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{aspect_ratios_match, merge_duplicate_phash_posts, phash_merge_preference};
+    use crate::admin::{self, AdminResult};
+    use crate::model::enums::MimeType;
+    use crate::model::post::Post;
+    use crate::schema::post;
+    use crate::test::*;
+    use diesel::dsl::exists;
+    use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
+    use serial_test::{parallel, serial};
+    use std::cmp::Ordering;
+
+    fn load_post(post_id: i64) -> AdminResult<Post> {
+        Ok(post::table
+            .find(post_id)
+            .select(Post::as_select())
+            .first(&mut get_connection()?)?)
+    }
+
+    fn variant(base: &Post, id: i64, width: i32, height: i32, mime_type: MimeType, file_size: i64) -> Post {
+        let mut post = base.clone();
+        post.id = id;
+        post.width = width;
+        post.height = height;
+        post.mime_type = mime_type;
+        post.file_size = file_size;
+        post
+    }
+
+    #[test]
+    #[parallel]
+    fn phash_survivor_preference() -> AdminResult<()> {
+        let base = load_post(1)?;
+        let big_png = variant(&base, 10, 2000, 1000, MimeType::Png, 9000);
+        let small_jxl = variant(&base, 11, 1000, 500, MimeType::Jxl, 10);
+        let jxl = variant(&base, 12, 2000, 1000, MimeType::Jxl, 9500);
+        let small_png = variant(&base, 13, 2000, 1000, MimeType::Png, 8000);
+        let small_png_newer = variant(&base, 14, 2000, 1000, MimeType::Png, 8000);
+
+        // Resolution beats format and size.
+        assert_eq!(phash_merge_preference(&big_png, &small_jxl), Ordering::Less);
+        // On equal resolution JXL beats a smaller file.
+        assert_eq!(phash_merge_preference(&jxl, &small_png), Ordering::Less);
+        // Same resolution and format: smaller file, then lower ID.
+        assert_eq!(phash_merge_preference(&small_png, &big_png), Ordering::Less);
+        assert_eq!(phash_merge_preference(&small_png, &small_png_newer), Ordering::Less);
+
+        let mut group = vec![small_png_newer, small_jxl, small_png, big_png, jxl];
+        group.sort_by(phash_merge_preference);
+        let order: Vec<i64> = group.iter().map(|post| post.id).collect();
+        assert_eq!(order, [12, 13, 14, 10, 11]);
+        Ok(())
+    }
+
+    #[test]
+    #[parallel]
+    fn phash_aspect_ratio_guard() -> AdminResult<()> {
+        let base = load_post(1)?;
+        let original = variant(&base, 10, 1920, 1080, MimeType::Png, 1);
+        assert!(aspect_ratios_match(&original, &variant(&base, 11, 1280, 720, MimeType::Png, 1)));
+        // Rounding in a downscale shifts the ratio slightly.
+        assert!(aspect_ratios_match(&original, &variant(&base, 12, 1279, 720, MimeType::Png, 1)));
+        assert!(!aspect_ratios_match(&original, &variant(&base, 13, 1080, 1080, MimeType::Png, 1)));
+        assert!(!aspect_ratios_match(&original, &variant(&base, 14, 0, 0, MimeType::Png, 1)));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn merge_posts_sharing_phash() -> AdminResult<()> {
+        const PHASH: i64 = 0x0123_4567_89ab_cdef;
+        let state = get_state();
+        let mut conn = get_connection()?;
+
+        // Post 3 (BMP, 11146x7479) is the largest, so it survives. Post 4 becomes a downscaled
+        // copy of it, post 1 (1000x2000) is a different shape, and post 2 is an animation.
+        diesel::update(post::table.filter(post::id.eq_any([1, 2, 3, 4])))
+            .set(post::phash.eq(PHASH))
+            .execute(&mut conn)?;
+        diesel::update(post::table.find(4))
+            .set((post::width.eq(2229), post::height.eq(1496)))
+            .execute(&mut conn)?;
+        let survivor = load_post(3)?;
+        let absorbed_description = load_post(4)?.description;
+
+        merge_duplicate_phash_posts(&state, &mut admin::mock_editor());
+
+        let post_exists = |post_id: i64| -> AdminResult<bool> {
+            Ok(diesel::select(exists(post::table.find(post_id))).first(&mut get_connection()?)?)
+        };
+        assert!(post_exists(1)?, "post with a different aspect ratio must not be merged");
+        assert!(post_exists(2)?, "animations must not be merged");
+        assert!(post_exists(3)?, "highest-resolution post must survive");
+        assert!(!post_exists(4)?, "downscaled copy must be merged");
+
+        let merged = load_post(3)?;
+        assert_eq!(merged.mime_type, survivor.mime_type);
+        assert_eq!(merged.checksum, survivor.checksum);
+        assert_eq!(merged.width, survivor.width);
+        assert!(merged.description.contains(&*absorbed_description));
+
+        reset_database();
+        Ok(())
     }
 }

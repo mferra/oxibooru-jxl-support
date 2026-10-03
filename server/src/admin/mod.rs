@@ -108,6 +108,8 @@ pub enum AdminTask {
     RecalculatePhashTotal,
     #[strum(message = "Merge related posts whose content is pixel-identical (highest resolution, then JXL, wins)")]
     MergeDuplicatePosts,
+    #[strum(message = "Merge still images sharing a pHash (highest resolution, then JXL, then smaller file, wins)")]
+    MergeDuplicatePhashPosts,
     #[strum(message = "Import a CBZ archive as a pool, matching pages against existing posts")]
     ImportCbzAsPool,
 }
@@ -289,6 +291,7 @@ fn run_task(state: &AppState, task: AdminTask, post_editor: &mut PostEditor, use
         AdminTask::CalculatePhash => post::compute_phash(state, post_editor),
         AdminTask::RecalculatePhashTotal => post::recalculate_phash_total(state, post_editor),
         AdminTask::MergeDuplicatePosts => post::merge_duplicate_posts(state, post_editor),
+        AdminTask::MergeDuplicatePhashPosts => post::merge_duplicate_phash_posts(state, post_editor),
         AdminTask::ImportCbzAsPool => pool::import_cbz_as_pool(state, post_editor),
     }
 }
